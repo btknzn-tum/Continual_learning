@@ -43,10 +43,12 @@ def main():
     p.add_argument("--dataset", required=True)
     p.add_argument("--backbone", required=True, help="full spec, e.g. resnet50_layer4")
     p.add_argument("--metric", default="forgetting")
+    p.add_argument("--n-tasks", type=int, default=None)
     a = p.parse_args()
 
     from scipy import stats as sps
-    ref_tag = f"{a.dataset}_{a.backbone}_mas"
+    n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist", "fivedata") else 10)
+    ref_tag = f"{a.dataset}_{a.backbone}_t{n_tasks}_mas"
     ref = seed_values(ref_tag, a.metric)
     if len(ref) == 0:
         raise SystemExit(f"no results for {ref_tag}")
@@ -54,7 +56,7 @@ def main():
     print(f"MAS {a.metric}: {ref.mean()*100:.2f}±{ref.std()*100:.2f} (n={len(ref)})")
     print(f"{'vs':>8} {'mean±std':>16} {'t':>8} {'p':>10} {'p*Bonf':>10} sig")
     for comp in COMPETITORS:
-        vals = seed_values(f"{a.dataset}_{a.backbone}_{comp}", a.metric)
+        vals = seed_values(f"{a.dataset}_{a.backbone}_t{n_tasks}_{comp}", a.metric)
         if len(vals) == 0:
             print(f"{comp:>8} (missing)")
             continue

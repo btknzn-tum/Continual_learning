@@ -52,7 +52,8 @@ def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned):
     cfg.update(tuned.get(method_label, {}))
     cfg.update({"dataset": dataset, "backbone": backbone_full,
                 "seed": seed, "n_tasks": n_tasks})
-    tag = f"{dataset}_{backbone_full}_{method_label}"
+    # n_tasks in the tag: 10- and 20-task CIFAR-100 runs must not share a dir
+    tag = f"{dataset}_{backbone_full}_t{n_tasks}_{method_label}"
     t0 = time.time()
     if cfg["method"] == "joint":
         per_task = run_joint(cfg)
@@ -115,7 +116,7 @@ def main():
                    for k in metrics[0]}
             eff = base_tuned.get(method, {})
             row = {"dataset": a.dataset, "encoder": a.backbone, "depth": depth,
-                   "method": method, "seeds": len(seeds),
+                   "method": method, "seeds": len(seeds), "n_tasks": n_tasks,
                    "alpha": eff.get("alpha", ""),
                    "lwf_lambda": eff.get("lwf_lambda", ""),
                    "er_per_class": DEFAULT_CONFIG["er_per_class"],
@@ -132,6 +133,7 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out = os.path.join(RESULTS_DIR, f"bench_{a.dataset}_{a.backbone}.csv")
     if rows:
+        import fcntl
         fields = list(rows[0].keys())
         write_header = not os.path.exists(out)
         if not write_header:
@@ -141,11 +143,15 @@ def main():
                 out = os.path.join(RESULTS_DIR,
                                    f"bench_{a.dataset}_{a.backbone}_{fields.__len__()}c.csv")
                 write_header = not os.path.exists(out)
+        # exclusive lock: multiple parallel benchmark processes append to the
+        # same CSV — without it rows can interleave mid-line
         with open(out, "a", newline="") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
             w = csv.DictWriter(f, fieldnames=fields)
             if write_header:
                 w.writeheader()
             w.writerows(rows)
+            fcntl.flock(f, fcntl.LOCK_UN)
         print(f"\nappended {len(rows)} rows to {out}")
 
 
