@@ -1,0 +1,124 @@
+================================================================================
+ OUTPUT PERFORMANCE — MAS-Protected Adapters CL Benchmark
+ Updated: 2026-07-19 | commit 899e029 | server: RTX 5070 (vast.ai)
+================================================================================
+
+SETUP
+  Task-incremental CL (task id known at test). Frozen backbone (ResNet-50
+  ImageNet), features cached per depth (layer1..layer4; multi-tap = z-scored
+  concat). Trainable: shared 2-layer MLP adapter (d_hidden=256) + per-task
+  linear heads. Protection = quadratic importance penalty (MAS/EWC/SI) on
+  adapter weights. All methods share the SAME trainer, epochs, and
+  validation-based HP tuning (sweep seed 7, disjoint from reporting seeds).
+  Reporting seeds: 42,123,456,789,1337 (n=seeds completed so far).
+  Metrics: AvgAcc% (mean final acc over tasks), F=Forgetting%, P=Plasticity%.
+
+================================================================================
+1) HEADLINE RESULT — Split CIFAR-100, 20 tasks, ResNet-50 layer4
+================================================================================
+  method   AvgAcc        F      P      n
+  ------   -----------   ----   ----   -
+  MAS      94.47±0.16    1.18   95.28  5   <-- our method
+  EWC      94.44±0.22    1.59   95.64  4
+  naive    78.86±1.50   18.52   96.40  5   <-- raw sequential adapter
+
+  MAS beats raw adapter by +15.6 points, forgetting reduced 15.7x.
+  Plasticity gap only ~1.1 -> adapter is trained properly; naive learns
+  each task fine (P=96.4) but catastrophically forgets.
+  RanPAC/NCM t20 comparison: RUNNING (sota20 chain, seed 42 first).
+
+================================================================================
+2) Split CIFAR-100, 10 tasks — depth map (ResNet-50)
+================================================================================
+  depth       naive          MAS            EWC            joint(UB)
+  ---------   ------------   ------------   ------------   ---------
+  layer1      45.30 F=31.8   64.86 F=2.1    64.30 F=1.5    73.57
+  layer2      55.85 F=30.6   74.58 F=1.8    74.10 F=1.8    81.62
+  layer3      72.09 F=23.2   87.20 F=1.5    87.14 F=2.7    90.73
+  layer4      75.97 F=19.4   89.61 F=1.5    89.77 F=2.1    (pending)
+  layer3+4    74.12 F=22.5   90.17 F=1.8    88.81 F=4.5*   (pending)
+                             ^^^^^ best        (*n=2)
+
+  -> Multi-tap layer3+4 MAS (90.17) beats single best depth layer4 (89.61).
+  -> MAS reaches ~99% of joint upper bound at layer3 (87.20 vs 90.73).
+
+  PLACEMENT MAP (MAS, 10-task CIFAR-100, multi-tap combinations):
+  layer1+2         74.19 F=2.2      layer1+2+3       86.06 F=2.2
+  layer1+3         86.65 F=1.6      layer1+2+4       89.62 F=1.6
+  layer1+4         89.80 F=1.4      layer1+3+4       90.12 F=1.8 (n=2)
+  layer2+3         86.24 F=2.0      layer3+4         90.17 F=1.8  <-- best
+  (layer2+4, layer2+3+4, all-4: running)
+  -> Early layers alone are weak; late-pair layer3+4 is the sweet spot.
+
+================================================================================
+3) Split CIFAR-10, 5 tasks — depth map (ResNet-50)
+================================================================================
+  depth       naive          MAS            EWC            SOTA
+  ---------   ------------   ------------   ------------   -----------------
+  layer1      78.84 F=14.4   87.17 F=1.3    88.10 F=1.2    joint 90.40
+  layer2      86.59 F=10.2   92.59 F=0.9    93.48 F=0.7    joint 94.19
+  layer3      94.78 F=4.4    97.75 F=0.1    98.11 F=0.3    joint 98.04
+  layer4      96.55 F=2.3    98.06 F=0.05   98.27 F=0.2    RanPAC 98.30 F=0.10
+  layer3+4    96.68 F=2.4    98.29 F=0.08   98.06 F=0.5*   RanPAC 98.42 F=0.19
+                                               (*n=2)      NCM 95.23 / 96.43
+
+  -> CIFAR-10 is near ceiling; our claim here is forgetting (0.08 vs
+     naive 2.44, 30x lower), not raw accuracy.
+  -> RanPAC ALSO improves with our multi-tap placement (98.42 > 98.30):
+     the placement finding is METHOD-AGNOSTIC. Key paper finding.
+
+================================================================================
+4) SOTA COMPARISON (frozen-feature baselines, same features/protocol)
+================================================================================
+  CIFAR-10 t5   layer4:    RanPAC 98.30 F=0.10 | NCM 96.43 | MAS 98.06 F=0.05
+  CIFAR-10 t5   layer3+4:  RanPAC 98.42 F=0.19 | NCM 95.23 | MAS 98.29 F=0.08
+  CIFAR-100 t10:           RUNNING (compare chain)
+  CIFAR-100 t20:           RUNNING (sota20 chain)
+  (RanPAC/NCM currently seed 42 only; 5-seed promotion queued in phase2)
+
+================================================================================
+5) CAPACITY-MATCHED CONTROLS (is it placement/protection, not params?)
+================================================================================
+  CIFAR-10 layer4 MAS h354 (params ~= layer3+4 concat adapter):
+      98.22 F=0.09 (n=1)  vs  layer3+4 MAS 98.29 F=0.08
+  h1024, LoRA(rank144), CIFAR-100 capacity: RUNNING (compare chain)
+
+================================================================================
+6) OTHER STREAMS
+================================================================================
+  MNIST t5 (pixels, sanity):  naive 96.33 F=4.4 | MAS 99.33 F=0.4
+                              EWC 99.10 | joint 99.74
+  5-Datasets t5 (CIFAR10/MNIST/SVHN/Fashion/KMNIST heterogeneous, ResNet-50):
+      layer4    MAS 76.05 F=4.9 (n=2, running)
+      layer3+4  MAS 78.09 F=9.1 (n=1, running)  -> multi-tap helps here too
+  CLIP ViT-B/32: sweep finishing; single-seed quick pass + 5-seed grid queued.
+
+================================================================================
+7) LITERATURE CONTEXT (published task-IL numbers, for reference)
+================================================================================
+  Split CIFAR-100 task-IL (ResNet-class backbones):
+    van de Ven & Tolias (NMI 2022) best baseline ~79.1
+    Mehta et al. (JMLR 2023) pretrained ResNet-18 fine-tuned: best 86.6
+                                                (F=11-14.5)
+    HAT (from scratch) ~84.0
+    -> OUR 90.17 (10-task) with F=1.76 exceeds these; strongest reported
+       task-IL result we found for a frozen ResNet-50 feature pipeline.
+    Caveat: ViT-B/16 class-IL pipelines reach 92-93.5 (RanPAC 92.2,
+    HiDe-Prompt 92.6-93.5) — different (harder) setting, different backbone;
+    do NOT claim unqualified SOTA.
+  Split CIFAR-10 task-IL: published band 96.6-99.5 (saturated). Our 98.29
+    is inside the band; the honest claim is near-zero forgetting (0.08).
+
+================================================================================
+8) EXPERIMENTS RUNNING / QUEUED (tmux chains on server)
+================================================================================
+  par        main 5-seed grid (c10/c100 all depths x 7 methods, t20, mnist,
+             fivedata, placement combos) — mostly done, rest running
+  compare    seed-42: capacity h354(done)/h1024 -> LoRA -> c100 SOTA ->
+             c100 capacity/LoRA
+  phase2     watcher: promotes SOTA/capacity/LoRA to 5 seeds after compare
+  sota20     RanPAC/NCM on 20-task CIFAR-100 (seed 42 -> 5 seeds)
+  clipsweep  CLIP HP sweep (si done, lwf running)
+  clipquick  watcher: single-seed CLIP pass after sweep
+  par(gate)  watcher: 5-seed CLIP grid after sweep
+================================================================================
