@@ -59,18 +59,52 @@ def _load_split(dataset, backbone, split):
     return feats, labels
 
 
+def _zscore_concat(tr_parts, te_parts):
+    xtr_parts, xte_parts = [], []
+    for ftr, fte in zip(tr_parts, te_parts):
+        mu, sd = ftr.mean(0), ftr.std(0) + 1e-6
+        xtr_parts.append((ftr - mu) / sd)
+        xte_parts.append((fte - mu) / sd)
+    return torch.cat(xtr_parts, 1), torch.cat(xte_parts, 1)
+
+
 def load_cached(dataset: str, backbone: str):
     """Returns (xtr, ytr, xte, yte). Multi-tap: per-tap z-score from TRAIN stats."""
     tr, ytr = _load_split(dataset, backbone, "train")
     te, yte = _load_split(dataset, backbone, "test")
     if backbone in LEGACY_BACKBONES:
         return tr, ytr, te, yte
-    xtr_parts, xte_parts = [], []
-    for ftr, fte in zip(tr, te):
-        mu, sd = ftr.mean(0), ftr.std(0) + 1e-6
-        xtr_parts.append((ftr - mu) / sd)
-        xte_parts.append((fte - mu) / sd)
-    return torch.cat(xtr_parts, 1), ytr, torch.cat(xte_parts, 1), yte
+    xtr, xte = _zscore_concat(tr, te)
+    return xtr, ytr, xte, yte
+
+
+# 5-Datasets benchmark: each member dataset is one task (notMNIST->KMNIST).
+FIVE_DATASETS = ["cifar10", "mnist", "svhn", "fashion", "kmnist"]
+
+
+def build_task_stream(cfg):
+    """Return (train_sets, test_sets, class_counts) as a list of per-task
+    (x, y) tensors with labels remapped to 0..C_t-1.
+
+    dataset == "fivedata": 5 heterogeneous datasets, one per task (features of
+    each through the same frozen encoder/backbone spec).
+    otherwise: one dataset split into cfg["n_tasks"] class groups.
+    """
+    if cfg["dataset"] == "fivedata":
+        train_sets, test_sets, counts = [], [], []
+        for name in FIVE_DATASETS:
+            xtr, ytr, xte, yte = load_cached(name, cfg["backbone"])
+            classes = sorted(int(c) for c in ytr.unique())
+            train_sets.append(task_tensors(xtr, ytr, classes))
+            test_sets.append(task_tensors(xte, yte, classes))
+            counts.append(len(classes))
+        return train_sets, test_sets, counts
+    xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
+    n_classes = int(ytr.max()) + 1
+    splits = make_splits(n_classes, cfg["n_tasks"])
+    train_sets = [task_tensors(xtr, ytr, g) for g in splits]
+    test_sets = [task_tensors(xte, yte, g) for g in splits]
+    return train_sets, test_sets, [len(g) for g in splits]
 
 
 @torch.no_grad()
@@ -227,14 +261,10 @@ def _trim_and_freeze_head(model, task_id, task_x, tau, enabled):
 
 def run_sequence(cfg):
     set_seed(cfg["seed"])
-    xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
-    n_classes = int(ytr.max()) + 1
-    splits = make_splits(n_classes, cfg["n_tasks"])
-    T = cfg["n_tasks"]
-    model = Adapter(d_in=xtr.shape[1], d_hidden=cfg["d_hidden"])
-
-    train_sets = [task_tensors(xtr, ytr, g) for g in splits]
-    test_sets = [task_tensors(xte, yte, g) for g in splits]
+    train_sets, test_sets, class_counts = build_task_stream(cfg)
+    T = len(train_sets)
+    d_in = train_sets[0][0].shape[1]
+    model = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"])
 
     method = cfg["method"]
     use_reserve = method == "ours"
@@ -262,7 +292,7 @@ def run_sequence(cfg):
 
     for t in range(T):
         x, y = train_sets[t]
-        model.add_head(t, len(splits[t]))
+        model.add_head(t, class_counts[t])
         if use_si:
             si_state.start_task(model)
 
@@ -340,14 +370,12 @@ def run_sequence(cfg):
 
 def run_joint(cfg):
     set_seed(cfg["seed"])
-    xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
-    n_classes = int(ytr.max()) + 1
-    splits = make_splits(n_classes, cfg["n_tasks"])
-    model = Adapter(d_in=xtr.shape[1], d_hidden=cfg["d_hidden"])
+    train_sets, test_sets, class_counts = build_task_stream(cfg)
+    d_in = train_sets[0][0].shape[1]
+    model = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"])
     xs, ys, ts = [], [], []
-    for t, g in enumerate(splits):
-        model.add_head(t, len(g))
-        x, y = task_tensors(xtr, ytr, g)
+    for t, (x, y) in enumerate(train_sets):
+        model.add_head(t, class_counts[t])
         xs.append(x); ys.append(y)
         ts.append(torch.full((len(y),), t, dtype=torch.long))
     x_all, y_all, t_all = torch.cat(xs), torch.cat(ys), torch.cat(ts)
@@ -365,5 +393,4 @@ def run_joint(cfg):
             opt.zero_grad()
             loss.backward()
             opt.step()
-    return [evaluate(model, *task_tensors(xte, yte, g), t)
-            for t, g in enumerate(splits)]
+    return [evaluate(model, x, y, t) for t, (x, y) in enumerate(test_sets)]

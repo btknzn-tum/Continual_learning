@@ -83,7 +83,7 @@ def main():
     p.add_argument("--full", action="store_true", help="5 seeds instead of 3")
     a = p.parse_args()
     seeds = SEEDS_FULL if a.full else SEEDS_FAST
-    n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist") else 10)
+    n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist", "fivedata") else 10)
     tuned = {}
     if a.tuned_file and os.path.exists(a.tuned_file):
         tuned = json.load(open(a.tuned_file))

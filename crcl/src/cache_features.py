@@ -88,12 +88,86 @@ def get_encoder(name: str):
     raise ValueError(f"unknown encoder {name}")
 
 
+class RGBWrapper(torch.utils.data.Dataset):
+    """Wrap a dataset so every image is 3-channel RGB before the encoder transform
+    (MNIST/Fashion/KMNIST are grayscale; ResNet/CLIP expect RGB)."""
+
+    def __init__(self, base, transform):
+        self.base = base
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.base)
+
+    def __getitem__(self, i):
+        img, y = self.base[i]
+        return self.transform(img.convert("RGB")), y
+
+
+# 5-Datasets benchmark members. notMNIST -> KMNIST (torchvision-native, fully
+# reproducible; documented substitution). Each is one task, 10 classes.
+FIVE_DATASETS = ["cifar10", "mnist", "svhn", "fashion", "kmnist"]
+
+
+def build_dataset(name: str, train: bool, raw_transform):
+    """Return a dataset yielding (transformed_rgb_tensor, label)."""
+    kw = dict(root=DATA_DIR, download=True)
+    if name == "cifar10":
+        base = datasets.CIFAR10(train=train, **kw)
+    elif name == "cifar100":
+        base = datasets.CIFAR100(train=train, **kw)
+    elif name == "mnist":
+        base = datasets.MNIST(train=train, **kw)
+    elif name == "fashion":
+        base = datasets.FashionMNIST(train=train, **kw)
+    elif name == "kmnist":
+        base = datasets.KMNIST(train=train, **kw)
+    elif name == "svhn":
+        base = datasets.SVHN(split="train" if train else "test", **kw)
+    else:
+        raise ValueError(f"unknown sub-dataset {name}")
+    return RGBWrapper(base, raw_transform)
+
+
+def cache_one(name, backbone, model, tf, extract, depths, batch_size, workers, device):
+    for split, train in [("train", True), ("test", False)]:
+        targets = {d: os.path.join(CACHE_DIR, f"{name}_{backbone}_{d}_{split}.pt")
+                   for d in depths}
+        if all(os.path.exists(p) for p in targets.values()):
+            print(f"skip {name} {split} (cached)", flush=True)
+            continue
+        ds = build_dataset(name, train, tf)
+        dl = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=workers)
+        buffers = {d: [] for d in depths}
+        labels = []
+        with torch.no_grad():
+            for i, (x, y) in enumerate(dl):
+                feats = extract(model, x.to(device))
+                for d in depths:
+                    buffers[d].append(feats[d].cpu())
+                labels.append(y)
+                if i % 25 == 0:
+                    print(f"{name}/{split}: batch {i}/{len(dl)}", flush=True)
+        y_all = torch.cat(labels).long()
+        for d in depths:
+            feat = torch.cat(buffers[d]).float()
+            torch.save({"features": feat, "labels": y_all}, targets[d])
+            print(f"saved {targets[d]} {tuple(feat.shape)}", flush=True)
+
+
 def main(dataset: str, backbone: str, batch_size: int, workers: int, depths):
     device = get_device()
     model, tf, extract = get_encoder(backbone)
     model.eval().to(device)
-    ds_cls = {"cifar10": datasets.CIFAR10, "cifar100": datasets.CIFAR100}[dataset]
     os.makedirs(CACHE_DIR, exist_ok=True)
+
+    if dataset == "fivedata":
+        for name in FIVE_DATASETS:
+            cache_one(name, backbone, model, tf, extract, depths,
+                      batch_size, workers, device)
+        return
+
+    ds_cls = {"cifar10": datasets.CIFAR10, "cifar100": datasets.CIFAR100}[dataset]
 
     for split, train in [("train", True), ("test", False)]:
         # skip if all requested depths already cached

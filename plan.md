@@ -62,12 +62,18 @@ To implement: **SI, LwF, ER** (~150 lines total in the existing trainer); EWC ex
 
 ## 3. BENCHMARK GRID
 
-### 3.1 Datasets (added incrementally, easy → hard)
+### 3.1 Datasets (added incrementally, easy → hard, + a heterogeneous stream)
 1. **Split-MNIST** (5×2, pixels) — sanity; done on laptop, re-verify on server.
 2. **Split CIFAR-10** (5×2) — done for ResNet-18-final; extend to all placements/encoders.
 3. **Split CIFAR-100 (10×10)** — the core field-standard table.
 4. **Split CIFAR-100 (20×5)** — long-stream stress test.
-5. **TinyImageNet (10×20)** — scale + harder features (stretch goal, same caching flow).
+5. **5-Datasets** (CIFAR-10 / MNIST / SVHN / Fashion-MNIST / KMNIST, one dataset per
+   task, 5×10) — the **heterogeneous-stream** benchmark: maximum distribution shift
+   between tasks (grayscale↔RGB, digits↔objects↔letters), the hardest forgetting
+   scenario. All images pass through the same frozen encoder → comparable features.
+   (Canonical 5-Datasets uses notMNIST; we substitute KMNIST — torchvision-native,
+   fully reproducible — and document it.)
+6. **TinyImageNet (10×20)** — scale + harder features (stretch goal, same caching flow).
 
 ### 3.2 Encoders (frozen, cached once per dataset on the GPU server)
 - **ResNet-50** (ImageNet-V2): taps = GAP(layer1 256-d, layer2 512-d, layer3 1024-d, layer4 2048-d).
@@ -119,6 +125,7 @@ Per encoder: 4 taps → **15 non-empty subsets** (4 single + 11 multi-tap concat
 - **S5** — Placement study: MAS × all 15 subsets × both encoders × CIFAR-100-10 × 5 seeds.
   → placement figure.
 - **S6** — Tier 2: CIFAR-10 (all placements) + CIFAR-100-20 (best placement) + MNIST re-run.
+- **S6b** — 5-Datasets heterogeneous-stream benchmark (both encoders, best + multi-tap).
 - **S7** — (stretch) TinyImageNet tier.
 - **S8** — `stats.py` significance tables, `plots.py` final figures, results frozen.
 - **S9** — **Paper writing** (LaTeX, venue template): Intro / Related work (adapter CL,

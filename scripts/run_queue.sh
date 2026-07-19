@@ -31,6 +31,9 @@ step cache_c10_r50      $PY $SRC/cache_features.py --dataset cifar10  --backbone
 step cache_c100_r50     $PY $SRC/cache_features.py --dataset cifar100 --backbone resnet50    --batch-size 256
 step cache_c10_clip     $PY $SRC/cache_features.py --dataset cifar10  --backbone clip_vitb32 --batch-size 256
 step cache_c100_clip    $PY $SRC/cache_features.py --dataset cifar100 --backbone clip_vitb32 --batch-size 256
+# 5-Datasets (CIFAR10/MNIST/SVHN/Fashion/KMNIST — heterogeneous stream)
+step cache_5d_r50       $PY $SRC/cache_features.py --dataset fivedata --backbone resnet50    --batch-size 256
+step cache_5d_clip      $PY $SRC/cache_features.py --dataset fivedata --backbone clip_vitb32 --batch-size 256
 
 # ---- S3: hyperparameter sweeps (seed 42) on the CORE dataset -----------------
 step sweep_c100_r50     $PY $SRC/run_sweep.py --dataset cifar100 --backbone resnet50_layer4
@@ -72,6 +75,14 @@ step bench_c100t20_r50  $PY $SRC/run_benchmark.py --dataset cifar100 --backbone 
 step bench_c100t20_clip $PY $SRC/run_benchmark.py --dataset cifar100 --backbone clip_vitb32 \
   --depths final --n-tasks 20 --tuned-file crcl/results/tuned_cifar100_clip_vitb32_final.json --full
 step bench_mnist     $PY $SRC/run_benchmark.py --dataset mnist --backbone pixels --depths - --full
+
+# ---- S6b: 5-Datasets — heterogeneous-stream benchmark (max distribution shift) --
+step bench_5d_r50    $PY $SRC/run_benchmark.py --dataset fivedata --backbone resnet50 \
+  --depths layer4 "layer3+layer4" \
+  --tuned-file crcl/results/tuned_cifar100_resnet50_layer4.json --full
+step bench_5d_clip   $PY $SRC/run_benchmark.py --dataset fivedata --backbone clip_vitb32 \
+  --depths final "block9+final" \
+  --tuned-file crcl/results/tuned_cifar100_clip_vitb32_final.json --full
 
 echo ""
 echo "[QUEUE] $(date '+%F %T') ALL STEPS FINISHED"

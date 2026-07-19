@@ -9,7 +9,6 @@ import json
 import os
 
 import numpy as np
-from scipy import stats as sps
 
 from common import RESULTS_DIR
 
@@ -31,6 +30,7 @@ def main():
     p.add_argument("--metric", default="forgetting")
     a = p.parse_args()
 
+    from scipy import stats as sps
     ref_tag = f"{a.dataset}_{a.backbone}_mas"
     ref = seed_values(ref_tag, a.metric)
     if len(ref) == 0:
