@@ -54,5 +54,9 @@ DEFAULT_CONFIG = {
     # >0 during sweeps only: carve this fraction of TRAIN as validation for
     # honest hyperparameter selection (test set never used for tuning).
     "val_frac": 0.0,
+    # adapter architecture: "mlp" (2-layer ReLU) or "lora" (linear residual,
+    # rank chosen to roughly match the MLP adapter's trainable params)
+    "arch": "mlp",
+    "lora_rank": 144,
     "seed": 42,
 }

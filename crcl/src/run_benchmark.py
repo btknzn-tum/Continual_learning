@@ -48,14 +48,22 @@ def bwt(A):
     return float(np.mean([A[T - 1, t] - A[t, t] for t in range(T - 1)]))
 
 
-def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned):
+def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned,
+             d_hidden=None, arch="mlp"):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update(METHODS[method_label])
     cfg.update(tuned.get(method_label, {}))
     cfg.update({"dataset": dataset, "backbone": backbone_full,
-                "seed": seed, "n_tasks": n_tasks})
-    # n_tasks in the tag: 10- and 20-task CIFAR-100 runs must not share a dir
+                "seed": seed, "n_tasks": n_tasks, "arch": arch})
+    if d_hidden:
+        cfg["d_hidden"] = d_hidden
+    # n_tasks in the tag: 10- and 20-task CIFAR-100 runs must not share a dir;
+    # non-default d_hidden / lora arch get their own suffix (capacity controls)
     tag = f"{dataset}_{backbone_full}_t{n_tasks}_{method_label}"
+    if d_hidden and d_hidden != DEFAULT_CONFIG["d_hidden"]:
+        tag += f"_h{d_hidden}"
+    if arch == "lora":
+        tag += f"_lora{cfg['lora_rank']}"
     t0 = time.time()
     if cfg["method"] == "joint":
         per_task = run_joint(cfg)
@@ -81,11 +89,16 @@ def main():
                    help='depth specs, e.g. layer4 "layer3+layer4"; use "-" for legacy/pixels')
     p.add_argument("--methods", nargs="*", default=DEFAULT_METHODS)
     p.add_argument("--alpha", type=float, default=10.0)
+    p.add_argument("--d-hidden", type=int, default=None,
+                   help="override adapter width (capacity-control runs)")
+    p.add_argument("--arch", default="mlp", choices=["mlp", "lora"])
+    p.add_argument("--seeds", nargs="*", type=int, default=None,
+                   help="explicit seed list (overrides --full/fast)")
     p.add_argument("--tuned-file", default=None)
     p.add_argument("--n-tasks", type=int, default=None)
     p.add_argument("--full", action="store_true", help="5 seeds instead of 3")
     a = p.parse_args()
-    seeds = SEEDS_FULL if a.full else SEEDS_FAST
+    seeds = a.seeds if a.seeds else (SEEDS_FULL if a.full else SEEDS_FAST)
     n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist", "fivedata") else 10)
     tuned = {}
     if a.tuned_file and os.path.exists(a.tuned_file):
@@ -111,7 +124,7 @@ def main():
             metrics = []
             for seed in seeds:
                 m = run_cell(a.dataset, backbone_full, method, seed, n_tasks,
-                             base_tuned)
+                             base_tuned, d_hidden=a.d_hidden, arch=a.arch)
                 metrics.append(m)
             agg = {k: (float(np.mean([mm[k] for mm in metrics])),
                        float(np.std([mm[k] for mm in metrics])))

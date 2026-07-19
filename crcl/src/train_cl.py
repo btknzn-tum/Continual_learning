@@ -25,8 +25,14 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from adapter import Adapter
+from adapter import Adapter, LoRAAdapter
 from common import CACHE_DIR, set_seed
+
+
+def _build_model(cfg, d_in):
+    if cfg.get("arch", "mlp") == "lora":
+        return LoRAAdapter(d_in=d_in, rank=cfg.get("lora_rank", 144))
+    return Adapter(d_in=d_in, d_hidden=cfg["d_hidden"])
 from importance import importance, phi_activations
 from reserve import (claim_units, dormancy_fraction, make_reserved_masks,
                      mean_activations, reserve_loss, verify_dormant)
@@ -290,7 +296,7 @@ def run_sequence(cfg):
     train_sets, test_sets, class_counts = build_task_stream(cfg)
     T = len(train_sets)
     d_in = train_sets[0][0].shape[1]
-    model = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"])
+    model = _build_model(cfg, d_in)
 
     method = cfg["method"]
     use_reserve = method == "ours"
@@ -398,7 +404,7 @@ def run_joint(cfg):
     set_seed(cfg["seed"])
     train_sets, test_sets, class_counts = build_task_stream(cfg)
     d_in = train_sets[0][0].shape[1]
-    model = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"])
+    model = _build_model(cfg, d_in)
     xs, ys, ts = [], [], []
     for t, (x, y) in enumerate(train_sets):
         model.add_head(t, class_counts[t])
