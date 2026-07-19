@@ -56,7 +56,15 @@ def importance(model, prev_data, prev_task_ids, method: str = "sfxphi"):
     d1 = model.fc1.out_features
     d2 = model.fc2.out_features
 
-    if method in ("sf", "sfxphi", "phi"):
+    if method == "l2":
+        # uniform importance = plain L2-SP (cheapest control)
+        S = {
+            "fc1": torch.ones_like(model.fc1.weight),
+            "fc2": torch.ones_like(model.fc2.weight),
+            "b_fc1": torch.ones(d1),
+            "b_fc2": torch.ones(d2),
+        }
+    elif method in ("sf", "sfxphi", "phi"):
         phi1, phi2 = phi_activations(model, prev_x)
         if method == "phi":
             S = {

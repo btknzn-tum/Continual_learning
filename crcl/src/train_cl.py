@@ -97,8 +97,22 @@ def run_sequence(cfg):
     train_sets = [task_tensors(xtr, ytr, g) for g in splits]
     test_sets = [task_tensors(xte, yte, g) for g in splits]
 
-    use_reserve = cfg["method"] == "ours"
-    use_mas_adapter = cfg["method"] == "mas_adapter"
+    method = cfg["method"]
+    use_reserve = method == "ours"
+    # Pure importance-penalty methods (the paper's primary path): no reserve loss,
+    # no delta-norm cap — the framework ablation showed both HURT. "mas_adapter" ==
+    # "reg:mas"; "reg:<signal>" selects any importance signal for the pure penalty.
+    if method == "mas_adapter":
+        pure_signal = "mas"
+    elif method.startswith("reg:"):
+        pure_signal = method.split(":", 1)[1]
+    else:
+        pure_signal = None
+    use_pure = pure_signal is not None
+    # Zero the framework knobs for the pure path so cfg defaults (gamma=100) can't
+    # silently re-enable the harmful delta-norm cap.
+    cfg_pure = {**cfg, "gamma": 0.0, "beta_res": 0.0} if use_pure else cfg
+
     R = make_reserved_masks(cfg["d_hidden"], cfg["q"], seed=cfg["seed"]) if use_reserve else None
     R_unclaimed = copy.deepcopy(R) if use_reserve else None
 
@@ -108,16 +122,16 @@ def run_sequence(cfg):
     for t in range(T):
         x, y = train_sets[t]
         model.add_head(t, len(splits[t]))
-        if t == 0 or (not use_reserve and not use_mas_adapter):
+        if t == 0 or (not use_reserve and not use_pure):
             train_task(model, x, y, t, cfg,
                        res_masks=R if use_reserve else None)
         else:
             prev_data = [(k,) + subsample(*train_sets[k], cfg["phi_samples"], seed=cfg["seed"] + k)
                          for k in range(t)]
-            importance_method = "mas" if use_mas_adapter else cfg["importance"]
+            importance_method = pure_signal if use_pure else cfg["importance"]
             S = importance(model, prev_data, list(range(t)), method=importance_method)
             theta_old = _snapshot(model)
-            train_task(model, x, y, t, cfg,
+            train_task(model, x, y, t, cfg_pure if use_pure else cfg,
                        res_masks=R_unclaimed if use_reserve else None,
                        S=S, theta_old=theta_old)
             with torch.no_grad():
@@ -126,7 +140,7 @@ def run_sequence(cfg):
                 den = torch.sqrt(sum((w ** 2).sum() for w in theta_old["w"].values()))
                 stats["delta_rel"].append(float(torch.sqrt(dsq) / den))
 
-        if not use_reserve and not use_mas_adapter and t == 0:
+        if method == "naive" and t == 0:
             # control: accidental dormancy right after task 1, same timepoint
             # as the ours-side measurement below (comparing after-1-task vs
             # after-T-tasks states would invalidate the comparison)

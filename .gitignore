@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pt
+*.pkl
+*.tar.gz
+crcl/cache/
+crcl/data/
+crcl/results/
+crcl/tests/_tmp_cache/
