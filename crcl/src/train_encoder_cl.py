@@ -129,8 +129,11 @@ def build_stream(dataset, n_tasks, val_frac=0.0, seed=42):
     train_sets, eval_sets, counts = [], [], []
     if dataset == "fivedata":
         for name in FIVE_DATASETS:
+            tload = time.time()
             xtr, ytr = load_raw(name, True)
             xte, yte = load_raw(name, False)
+            print(f"  [data] {name}: {len(xtr)} train ({time.time() - tload:.0f}s)",
+                  flush=True)
             classes = sorted(ytr.unique().tolist())
             train_sets.append((xtr, remap(ytr, classes)))
             eval_sets.append((xte, remap(yte, classes)))
@@ -298,10 +301,12 @@ def run_stream(cfg, device):
     tf = GPUTransform(device)
     B = cfg["batch_size"]
 
+    print(f"  [data] stream ready ({T} tasks)", flush=True)
     encoder = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
     encoder.eval().to(device)  # eval() for the WHOLE stream: BN stats frozen
     for p in encoder.parameters():
         p.requires_grad_(False)
+    print("  [enc] resnet50 on gpu", flush=True)
 
     d_in = sum(TAP_DIMS[t] for t in taps)
     adapter = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"]).to(device)
@@ -321,6 +326,7 @@ def run_stream(cfg, device):
         # per-task z-stats at ARRIVAL, current encoder, this task's data only
         stats_per_task[t] = compute_tap_stats(encoder, x_t, y_t, taps, device,
                                               B, tf)
+        print(f"  [t{t}] z-stats done ({time.time() - t0:.0f}s)", flush=True)
 
         if t == 0:
             # encoder frozen -> features constant: extract once, train fast
