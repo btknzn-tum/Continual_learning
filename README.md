@@ -60,7 +60,20 @@ scp -i ~/.ssh/id_ed25519_new -P <PORT> -r root@<HOST>:~/Continual_learning/crcl/
 
 ## GPU Connection Information
 
-Vast.ai rented instance — **NVIDIA RTX 3090**.
+Vast.ai rented instance — **NVIDIA RTX 5070 (12 GB)**. Preinstalled: torch 2.11.0+cu128,
+torchvision 0.26.0 (CUDA works out of the box — no torch download needed).
+
+### Connect (current instance)
+
+```bash
+ssh -i ~/.ssh/id_ed25519_new -p 18448 root@69.176.92.138 -L 8080:localhost:8080
+# or via proxy:
+ssh -i ~/.ssh/id_ed25519_new -p 24135 root@ssh5.vast.ai -L 8080:localhost:8080
+```
+
+---
+
+### Previous instance (RTX 3090, network died — kept for reference)
 
 ### SSH key
 
