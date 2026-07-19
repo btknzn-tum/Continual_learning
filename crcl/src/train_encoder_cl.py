@@ -105,7 +105,8 @@ class GPUTransform:
         x = xb_u8.float().div_(255.0)
         x = F.interpolate(x, size=224, mode="bicubic",
                           align_corners=False).clamp_(0.0, 1.0)
-        return (x - self.mean) / self.std
+        x = (x - self.mean) / self.std
+        return x.contiguous(memory_format=torch.channels_last)
 
 
 def iter_batches(x, y, batch, device, shuffle=False, generator=None):
@@ -304,6 +305,7 @@ def run_stream(cfg, device):
     print(f"  [data] stream ready ({T} tasks)", flush=True)
     encoder = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
     encoder.eval().to(device)  # eval() for the WHOLE stream: BN stats frozen
+    encoder.to(memory_format=torch.channels_last)
     for p in encoder.parameters():
         p.requires_grad_(False)
     print("  [enc] resnet50 on gpu", flush=True)
@@ -452,7 +454,7 @@ def main():
     p.add_argument("--enc-lr", type=float, default=1e-4)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--phi-samples", type=int, default=2000)
     p.add_argument("--val-frac", type=float, default=0.0,
                    help=">0: tune on a train holdout (sweeps only)")
