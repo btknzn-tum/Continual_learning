@@ -12,15 +12,23 @@ with the encoder HARD-masked so only the bottom enc_q fraction of parameters
 (by accumulated MAS importance through encoder+adapter) receives gradients.
 Once a task claims a parameter its importance rises, so it (a) gets penalized
 and (b) rotates OUT of the trainable set at the next task — capacity rotation
-without stored per-task masks (unlike PackNet).
+without stored per-task masks (unlike PackNet). Mask overlap across tasks is
+logged (stats["mask_overlap"]) as direct evidence for/against rotation.
 
-Task 0 trains the adapter only (encoder frozen; importance undefined yet) —
-features are extracted once, so task 0 matches the cached reg:mas pipeline.
-BatchNorm stays in eval() mode for the entire stream (running stats frozen);
-BN affine params may still enter the trainable subset. NOT full fine-tuning.
+Only encoder stages UPSTREAM of the deepest requested tap are eligible for
+selective training (params downstream of the taps get zero gradient and would
+otherwise absorb the whole bottom-q budget as a silent no-op).
 
-Ablations: --sim-lambda 0 (no anchor), --alpha-enc 0 (no encoder penalty),
---enc-q 0 (frozen encoder == e2e replica of cached reg:mas).
+Task 0 trains the adapter only (encoder frozen; importance undefined yet).
+Z-score stats are computed PER TASK at task arrival (current encoder, that
+task's train data only — causal, mirrors the cached pipeline's per-member
+stats on fivedata). Defaults (epochs=20, phi_samples=2000, batch 64) match the
+cached benchmark for honest comparison. BatchNorm stays in eval() mode for the
+whole stream (running stats frozen). NOT full fine-tuning.
+
+Ablations (get their own result tags automatically): --sim-lambda 0,
+--alpha-enc 0, --enc-q 0 (frozen encoder).
+Training/importance/extraction run under bf16 autocast; penalties in fp32.
 """
 import argparse
 import copy
@@ -38,10 +46,12 @@ from cache_features import (FIVE_DATASETS, IMAGENET_TF, build_dataset,
 from common import DEFAULT_CONFIG, RESULTS_DIR, set_seed
 from metrics import compute_metrics, save_result
 from tasks import make_splits
-from train_cl import PARAM_NAMES, _params, _snapshot, git_hash
+from train_cl import _params, _snapshot, git_hash
 from adapter import Adapter
 
 TAP_DIMS = {"layer1": 256, "layer2": 512, "layer3": 1024, "layer4": 2048}
+# encoder stages in forward order; eligibility stops at the deepest tap
+STAGE_ORDER = ["conv1", "bn1", "layer1", "layer2", "layer3", "layer4"]
 
 
 def bwt(A):
@@ -51,13 +61,17 @@ def bwt(A):
     return float(np.mean([A[T - 1, t] - A[t, t] for t in range(T - 1)]))
 
 
+def _qstr(q):
+    return f"{q:g}".replace(".", "p")
+
+
 class TaskView(torch.utils.data.Dataset):
     """Subset of a base dataset restricted to `indices`, labels remapped to
     0..C_t-1 via the sorted class list."""
 
     def __init__(self, base, indices, classes):
         self.base = base
-        self.indices = indices
+        self.indices = list(indices)
         self.remap = {c: i for i, c in enumerate(sorted(classes))}
 
     def __len__(self):
@@ -76,28 +90,45 @@ def get_labels(wrapped):
     return [int(v) for v in t]
 
 
-def build_stream(dataset, n_tasks):
-    """Return (train_views, test_views, class_counts) of image datasets."""
+def _split_view(view, val_frac, seed):
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(len(view.indices), generator=g).tolist()
+    n_val = int(round(val_frac * len(perm)))
+    classes = sorted(view.remap.keys())
+    tr = TaskView(view.base, [view.indices[i] for i in perm[n_val:]], classes)
+    va = TaskView(view.base, [view.indices[i] for i in perm[:n_val]], classes)
+    return tr, va
+
+
+def build_stream(dataset, n_tasks, val_frac=0.0, seed=42):
+    """Return (train_views, eval_views, class_counts). val_frac>0 carves a
+    per-task validation split from TRAIN (test never touched) for tuning."""
     if dataset == "fivedata":
         train_views, test_views, counts = [], [], []
         for name in FIVE_DATASETS:
             tr = build_dataset(name, True, IMAGENET_TF)
             te = build_dataset(name, False, IMAGENET_TF)
             classes = sorted(set(get_labels(tr)))
-            train_views.append(TaskView(tr, list(range(len(tr))), classes))
-            test_views.append(TaskView(te, list(range(len(te))), classes))
+            train_views.append(TaskView(tr, range(len(tr)), classes))
+            test_views.append(TaskView(te, range(len(te)), classes))
             counts.append(len(classes))
-        return train_views, test_views, counts
-    tr = build_dataset(dataset, True, IMAGENET_TF)
-    te = build_dataset(dataset, False, IMAGENET_TF)
-    ytr = np.array(get_labels(tr))
-    yte = np.array(get_labels(te))
-    splits = make_splits(int(ytr.max()) + 1, n_tasks)
-    train_views = [TaskView(tr, np.where(np.isin(ytr, g))[0].tolist(), g)
-                   for g in splits]
-    test_views = [TaskView(te, np.where(np.isin(yte, g))[0].tolist(), g)
-                  for g in splits]
-    return train_views, test_views, [len(g) for g in splits]
+    else:
+        tr = build_dataset(dataset, True, IMAGENET_TF)
+        te = build_dataset(dataset, False, IMAGENET_TF)
+        ytr = np.array(get_labels(tr))
+        yte = np.array(get_labels(te))
+        splits = make_splits(int(ytr.max()) + 1, n_tasks)
+        train_views = [TaskView(tr, np.where(np.isin(ytr, g))[0].tolist(), g)
+                       for g in splits]
+        test_views = [TaskView(te, np.where(np.isin(yte, g))[0].tolist(), g)
+                      for g in splits]
+        counts = [len(g) for g in splits]
+    if val_frac > 0:
+        pairs = [_split_view(v, val_frac, seed + i)
+                 for i, v in enumerate(train_views)]
+        train_views = [p[0] for p in pairs]
+        test_views = [p[1] for p in pairs]
+    return train_views, test_views, counts
 
 
 def sub_view(view, n, seed):
@@ -107,9 +138,13 @@ def sub_view(view, n, seed):
     return Subset(view, torch.randperm(len(view), generator=g)[:n].tolist())
 
 
-def enc_named_params(encoder):
-    """Encoder params eligible for selective training (classifier fc excluded)."""
-    return {n: p for n, p in encoder.named_parameters() if not n.startswith("fc")}
+def enc_named_params(encoder, taps):
+    """Encoder params eligible for selective training: only stages UPSTREAM of
+    (and including) the deepest requested tap; fc always excluded."""
+    deepest = max(STAGE_ORDER.index(t) for t in taps)
+    keep = set(STAGE_ORDER[:deepest + 1])
+    return {n: p for n, p in encoder.named_parameters()
+            if n.split(".")[0] in keep}
 
 
 def tap_feats(encoder, x, taps, stats):
@@ -125,20 +160,39 @@ def tap_feats(encoder, x, taps, stats):
 
 
 @torch.no_grad()
+def compute_tap_stats(encoder, view, taps, device, batch, workers):
+    """Per-tap (mu, sd) over `view` under the CURRENT encoder (fp32)."""
+    dl = DataLoader(view, batch_size=batch, shuffle=False, num_workers=workers)
+    buf = {t: [] for t in taps}
+    for xb, _ in dl:
+        d = resnet_depth_features(encoder, xb.to(device))
+        for t in taps:
+            buf[t].append(d[t].cpu())
+    out = {}
+    for t in taps:
+        f = torch.cat(buf[t])
+        out[t] = (f.mean(0).to(device), (f.std(0) + 1e-6).to(device))
+    return out
+
+
+@torch.no_grad()
 def extract_view(encoder, view, taps, stats, device, batch, workers):
     dl = DataLoader(view, batch_size=batch, shuffle=False, num_workers=workers)
     fs, ys = [], []
     for xb, yb in dl:
-        fs.append(tap_feats(encoder, xb.to(device), taps, stats).cpu())
+        with torch.autocast("cuda", dtype=torch.bfloat16,
+                            enabled=device.type == "cuda"):
+            f = tap_feats(encoder, xb.to(device), taps, stats)
+        fs.append(f.float().cpu())
         ys.append(yb)
     return torch.cat(fs), torch.cat(ys).long()
 
 
-def joint_mas_importance(encoder, adapter, train_views, tasks, taps, stats,
-                         device, samples, batch, workers, seed):
+def joint_mas_importance(encoder, adapter, train_views, tasks, taps,
+                         stats_per_task, device, samples, batch, workers, seed):
     """MAS importance |d||logits||^2/dw| accumulated over prev-task samples,
-    jointly for encoder AND adapter (one backward pass computes both)."""
-    ep = enc_named_params(encoder)
+    jointly for encoder AND adapter (one backward computes both)."""
+    ep = enc_named_params(encoder, taps)
     imp_e = {n: torch.zeros_like(p) for n, p in ep.items()}
     imp_a = {k: torch.zeros_like(v) for k, v in _params(adapter).items()}
     for p in ep.values():
@@ -148,9 +202,12 @@ def joint_mas_importance(encoder, adapter, train_views, tasks, taps, stats,
         dl = DataLoader(sub_view(train_views[k], samples, seed + k),
                         batch_size=batch, shuffle=False, num_workers=workers)
         for xb, _ in dl:
-            feats = tap_feats(encoder, xb.to(device), taps, stats)
-            _, _, logits = adapter(feats, k)
-            loss = logits.pow(2).sum(1).mean()
+            with torch.autocast("cuda", dtype=torch.bfloat16,
+                                enabled=device.type == "cuda"):
+                feats = tap_feats(encoder, xb.to(device), taps,
+                                  stats_per_task[k])
+                _, _, logits = adapter(feats, k)
+                loss = logits.float().pow(2).sum(1).mean()
             encoder.zero_grad(set_to_none=False)
             adapter.zero_grad(set_to_none=False)
             loss.backward()
@@ -165,8 +222,7 @@ def joint_mas_importance(encoder, adapter, train_views, tasks, taps, stats,
     adapter.zero_grad(set_to_none=True)
     imp_e = {n: v / nb for n, v in imp_e.items()}
     imp_a = {k: v / nb for k, v in imp_a.items()}
-    # global single-max normalization (preserves cross-tensor ratios), applied
-    # separately per component — mask needs encoder RANKS, penalty needs scale
+    # global single-max normalization (preserves cross-tensor ratios)
     gmax_a = max(float(v.max()) for v in imp_a.values()) + 1e-12
     imp_a = {k: v / gmax_a for k, v in imp_a.items()}
     gmax_e = max(float(v.max()) for v in imp_e.values()) + 1e-12
@@ -197,7 +253,8 @@ def eval_head(adapter, feats, ys, task_id, batch=2048):
 
 def run_stream(cfg, device):
     set_seed(cfg["seed"])
-    train_views, test_views, counts = build_stream(cfg["dataset"], cfg["n_tasks"])
+    train_views, eval_views, counts = build_stream(
+        cfg["dataset"], cfg["n_tasks"], cfg.get("val_frac", 0.0), cfg["seed"])
     T = len(train_views)
     taps = cfg["depth"].split("+")
 
@@ -206,37 +263,29 @@ def run_stream(cfg, device):
     for p in encoder.parameters():
         p.requires_grad_(False)
 
-    # fixed per-tap z-score stats from task-0 train features (initial encoder)
-    raw_stats = {}
-    with torch.no_grad():
-        dl = DataLoader(train_views[0], batch_size=cfg["batch_size"],
-                        shuffle=False, num_workers=cfg["workers"])
-        buf = {t: [] for t in taps}
-        for xb, _ in dl:
-            d = resnet_depth_features(encoder, xb.to(device))
-            for t in taps:
-                buf[t].append(d[t].cpu())
-        for t in taps:
-            f = torch.cat(buf[t])
-            raw_stats[t] = (f.mean(0).to(device), (f.std(0) + 1e-6).to(device))
-    stats = raw_stats
-
     d_in = sum(TAP_DIMS[t] for t in taps)
     adapter = Adapter(d_in=d_in, d_hidden=cfg["d_hidden"]).to(device)
 
     A = np.zeros((T, T))
-    run_stats = {"trainable_frac": [], "enc_delta": [], "task_sec": []}
-    test_cache = {}  # task -> (feats, ys) under the CURRENT encoder
+    run_stats = {"trainable_frac": [], "enc_delta": [], "task_sec": [],
+                 "mask_overlap": []}
+    stats_per_task = {}
+    prev_mask_flat = None
 
     for t in range(T):
         t0 = time.time()
         adapter.add_head(t, counts[t])
         adapter.heads[str(t)].to(device)
+        # per-task z-stats at ARRIVAL, current encoder, this task's data only
+        stats_per_task[t] = compute_tap_stats(
+            encoder, train_views[t], taps, device, cfg["batch_size"],
+            cfg["workers"])
 
         if t == 0:
             # encoder frozen -> features constant: extract once, train fast
-            feats, ys = extract_view(encoder, train_views[0], taps, stats,
-                                     device, cfg["batch_size"], cfg["workers"])
+            feats, ys = extract_view(encoder, train_views[0], taps,
+                                     stats_per_task[0], device,
+                                     cfg["batch_size"], cfg["workers"])
             dl = DataLoader(TensorDataset(feats, ys),
                             batch_size=cfg["batch_size"], shuffle=True)
             opt = torch.optim.AdamW(
@@ -252,17 +301,36 @@ def run_stream(cfg, device):
                     opt.step()
         else:
             S_enc, S_ad = joint_mas_importance(
-                encoder, adapter, train_views, list(range(t)), taps, stats,
-                device, cfg["phi_samples"], cfg["batch_size"], cfg["workers"],
-                cfg["seed"])
+                encoder, adapter, train_views, list(range(t)), taps,
+                stats_per_task, device, cfg["phi_samples"], cfg["batch_size"],
+                cfg["workers"], cfg["seed"])
             enc_masks, frac = bottom_q_masks(S_enc, cfg["enc_q"])
             run_stats["trainable_frac"].append(round(frac, 4))
+            cur_flat = (torch.cat([m.flatten() for m in enc_masks.values()])
+                        .bool() if cfg["enc_q"] > 0 else None)
+            if prev_mask_flat is not None and cur_flat is not None:
+                inter = (prev_mask_flat & cur_flat).sum()
+                union = (prev_mask_flat | cur_flat).sum()
+                run_stats["mask_overlap"].append(
+                    round(float(inter) / max(float(union), 1.0), 4))
+            prev_mask_flat = cur_flat
+            # penalty scale: renormalize importance WITHIN the trainable subset
+            # (bottom-q values are tiny under the global max; without this the
+            # encoder penalty is structurally a no-op and cannot be ablated)
+            if cfg["enc_q"] > 0:
+                pmax = max(float((v * enc_masks[n]).max())
+                           for n, v in S_enc.items()) + 1e-12
+                S_pen = {n: (v * enc_masks[n]) / pmax
+                         for n, v in S_enc.items()}
             theta_a = _snapshot(adapter)
-            ep = enc_named_params(encoder)
+            ep = enc_named_params(encoder, taps)
             theta_e = {n: p.detach().clone() for n, p in ep.items()}
-            teacher = copy.deepcopy(encoder).eval()
-            for p in teacher.parameters():
-                p.requires_grad_(False)
+            use_sim = cfg["enc_q"] > 0 and cfg["sim_lambda"] > 0
+            teacher = None
+            if use_sim:
+                teacher = copy.deepcopy(encoder).eval()
+                for p in teacher.parameters():
+                    p.requires_grad_(False)
             for p in ep.values():
                 p.requires_grad_(cfg["enc_q"] > 0)
 
@@ -273,26 +341,32 @@ def run_stream(cfg, device):
             opt = torch.optim.AdamW(groups, weight_decay=0.0)
 
             dl = DataLoader(train_views[t], batch_size=cfg["batch_size"],
-                            shuffle=True, num_workers=cfg["workers"])
+                            shuffle=True, num_workers=cfg["workers"],
+                            persistent_workers=cfg["workers"] > 0,
+                            pin_memory=device.type == "cuda")
             for _ in range(cfg["epochs"]):
                 for xb, yb in dl:
                     xb, yb = xb.to(device), yb.to(device)
-                    feats = tap_feats(encoder, xb, taps, stats)
-                    _, _, logits = adapter(feats, t)
-                    loss = F.cross_entropy(logits, yb)
+                    with torch.autocast("cuda", dtype=torch.bfloat16,
+                                        enabled=device.type == "cuda"):
+                        feats = tap_feats(encoder, xb, taps, stats_per_task[t])
+                        _, _, logits = adapter(feats, t)
+                        loss = F.cross_entropy(logits, yb).float()
+                        if use_sim:
+                            with torch.no_grad():
+                                tfeat = tap_feats(teacher, xb, taps,
+                                                  stats_per_task[t])
+                            loss = loss + cfg["sim_lambda"] * F.mse_loss(
+                                feats.float(), tfeat.float())
+                    # penalties in fp32 outside autocast (param-space sums)
                     if cfg["alpha"] > 0:
                         loss = loss + cfg["alpha"] * sum(
                             (S_ad[k] * (v - theta_a[k]) ** 2).sum()
                             for k, v in _params(adapter).items())
                     if cfg["enc_q"] > 0 and cfg["alpha_enc"] > 0:
                         loss = loss + cfg["alpha_enc"] * sum(
-                            (S_enc[n] * enc_masks[n]
-                             * (p - theta_e[n]) ** 2).sum()
+                            (S_pen[n] * (p - theta_e[n]) ** 2).sum()
                             for n, p in ep.items())
-                    if cfg["enc_q"] > 0 and cfg["sim_lambda"] > 0:
-                        with torch.no_grad():
-                            tfeat = tap_feats(teacher, xb, taps, stats)
-                        loss = loss + cfg["sim_lambda"] * F.mse_loss(feats, tfeat)
                     opt.zero_grad()
                     loss.backward()
                     if cfg["enc_q"] > 0:
@@ -300,6 +374,7 @@ def run_stream(cfg, device):
                             if p.grad is not None:
                                 p.grad *= enc_masks[n]
                     opt.step()
+            del dl
             with torch.no_grad():
                 dsq = sum(((p - theta_e[n]) ** 2).sum() for n, p in ep.items())
                 den = torch.sqrt(sum((v ** 2).sum() for v in theta_e.values()))
@@ -309,13 +384,12 @@ def run_stream(cfg, device):
             del teacher
 
         adapter.freeze_head(t)
-        # encoder changed -> re-extract ALL seen test sets under current encoder
+        # encoder changed -> re-extract ALL seen eval sets under current
+        # encoder, each with ITS OWN task's frozen z-stats
         for k in range(t + 1):
-            test_cache[k] = extract_view(encoder, test_views[k], taps, stats,
-                                         device, cfg["batch_size"],
-                                         cfg["workers"])
-        for k in range(t + 1):
-            fk, yk = test_cache[k]
+            fk, yk = extract_view(encoder, eval_views[k], taps,
+                                  stats_per_task[k], device,
+                                  cfg["batch_size"], cfg["workers"])
             A[t, k] = eval_head(adapter, fk.to(device), yk.to(device), k)
         run_stats["task_sec"].append(round(time.time() - t0, 1))
         print(f"  task {t}: acc_so_far={A[t, :t + 1].mean() * 100:.2f} "
@@ -339,14 +413,23 @@ def main():
     p.add_argument("--sim-lambda", type=float, default=1.0)
     p.add_argument("--enc-lr", type=float, default=1e-4)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--batch-size", type=int, default=128)
-    p.add_argument("--phi-samples", type=int, default=1000)
-    p.add_argument("--workers", type=int, default=6)
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=64)
+    p.add_argument("--phi-samples", type=int, default=2000)
+    p.add_argument("--val-frac", type=float, default=0.0,
+                   help=">0: tune on a train holdout (sweeps only)")
+    p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--overwrite", action="store_true")
     p.add_argument("--tag-suffix", default="")
     a = p.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    assert torch.cuda.is_available(), "CUDA required (refusing silent CPU run)"
+    device = torch.device("cuda")
+    torch.backends.cudnn.benchmark = True
+    torch.set_float32_matmul_precision("high")
+    print(f"device: {torch.cuda.get_device_name(0)}, "
+          f"torch {torch.__version__}", flush=True)
     n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "fivedata") else 10)
+    alpha_enc = a.alpha if a.alpha_enc is None else a.alpha_enc
 
     for depth in a.depths:
         for seed in a.seeds:
@@ -354,15 +437,25 @@ def main():
             cfg.update({
                 "dataset": a.dataset, "depth": depth, "n_tasks": n_tasks,
                 "seed": seed, "method": "enc:spmas", "enc_q": a.enc_q,
-                "alpha": a.alpha,
-                "alpha_enc": a.alpha if a.alpha_enc is None else a.alpha_enc,
+                "alpha": a.alpha, "alpha_enc": alpha_enc,
                 "sim_lambda": a.sim_lambda, "enc_lr": a.enc_lr, "lr": a.lr,
                 "epochs": a.epochs, "batch_size": a.batch_size,
                 "phi_samples": a.phi_samples, "workers": a.workers,
+                "val_frac": a.val_frac,
                 "backbone": f"r50enc_{depth}",
             })
+            # ablations and HP variants get distinct tags automatically
             tag = (f"{a.dataset}_r50enc_{depth}_t{n_tasks}_spmas"
-                   f"_q{int(round(a.enc_q * 100))}{a.tag_suffix}")
+                   f"_q{_qstr(a.enc_q)}")
+            if a.sim_lambda != 1.0:
+                tag += f"_sl{_qstr(a.sim_lambda)}"
+            if alpha_enc != a.alpha:
+                tag += f"_ae{_qstr(alpha_enc)}"
+            tag += a.tag_suffix
+            out = os.path.join(RESULTS_DIR, tag, f"seed{seed}.json")
+            if os.path.exists(out) and not a.overwrite:
+                print(f"skip {tag} seed {seed} (exists)", flush=True)
+                continue
             print(f"== {tag} seed {seed} ==", flush=True)
             t0 = time.time()
             A, run_stats = run_stream(cfg, device)
