@@ -225,24 +225,48 @@ block3+final & --- & 92.8$^*$ (0.8) & --- \\
 \end{tabular}
 \end{table}
 
-\todo{Fill layer4/l3+4 joint cells; complete CLIP 5-seed numbers from running
-grid; add Fig.~1 depth-vs-forgetting curves}
+\begin{figure}[t]
+\centering
+\includegraphics[width=\linewidth]{figs/fig1_depthmap.pdf}
+\caption{AvgAcc vs.\ insertion depth on Split CIFAR-100 (10 tasks). Protection
+(MAS/EWC) restores near-upper-bound accuracy at every depth; the naive
+collapse grows toward early taps on both encoders, but the placement optimum
+differs: late-pair multi-tap for ResNet-50, the final embedding for CLIP.}
+\label{fig:depthmap}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=.55\linewidth]{figs/fig2_heatmap.pdf}
+\caption{Placement heatmap: MAS-adapter AvgAcc over all ResNet-50 tap pairs
+(diagonal = single taps). The late pair L3+4 is the global optimum.}
+\label{fig:heatmap}
+\end{figure}
+
+\todo{Fill layer4/l3+4 joint cells; complete CLIP 5-seed EWC/naive cells from
+running grid}
 
 \subsection{Placement transfers to RanPAC}
 \label{sec:transfer}
 \begin{table}[t]
 \centering\small
-\caption{Applying our multi-tap placement to RanPAC (ResNet-50) improves it on
-every stream --- a placement-only change to a published method. 5 seeds except
-$^*$.}
+\caption{Applying our multi-tap placement to RanPAC improves it wherever the
+stream departs from the pre-training distribution --- a placement-only change
+to a published method. The gain scales with domain shift: negligible on
+near-ceiling CIFAR, decisive on the heterogeneous 5-dataset stream. 5 seeds
+except $^*$.}
 \label{tab:transfer}
-\begin{tabular}{lccc}
+\begin{tabular}{llccc}
 \toprule
-Stream & RanPAC (layer4) & RanPAC (layer3+4) & $\Delta$ \\
+Encoder & Stream & RanPAC (last tap) & RanPAC (multi-tap) & $\Delta$ \\
 \midrule
-Split CIFAR-10 & 98.30$^*$ & 98.42$^*$ & +0.12 \\
-Split CIFAR-100 (20 t.) & 95.88$\pm$0.10 & \best{96.15$\pm$0.26} & +0.27 \\
-5-Datasets & 82.69$\pm$0.04 & \best{87.28$\pm$0.10} & \best{+4.59} \\
+ResNet-50 & Split CIFAR-10 & 98.30$^*$ & 98.42$^*$ & +0.12 \\
+ResNet-50 & C100 (20 t.) & 95.88$\pm$0.10 & \best{96.15$\pm$0.26} & +0.27 \\
+ResNet-50 & 5-Datasets & 82.69$\pm$0.04 & \best{87.28$\pm$0.10} & \best{+4.59} \\
+\midrule
+CLIP ViT-B/32 & Split CIFAR-10 & 99.54$\pm$0.04 & 99.50$\pm$0.05 & $-$0.04 \\
+CLIP ViT-B/32 & C100 (10 t.) & 96.61$\pm$0.06 & 96.40$\pm$0.02 & $-$0.21 \\
+CLIP ViT-B/32 & 5-Datasets & 88.42$\pm$0.03 & \best{89.63$\pm$0.03} & \best{+1.21} \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -265,17 +289,23 @@ MAS adapter & 94.5$\pm$0.2 (1.2)$^{l4}$ & 79.5$\pm$1.4 (7.4) \\
 EWC adapter & 94.5$\pm$0.2 (1.5)$^{l4}$ & \todo{} \\
 Joint (adapter UB) & 95.1$\pm$0.2$^{l4}$ & \todo{} \\
 NCM & 93.6 & 69.4 \\
-RanPAC (+our placement) & \best{96.2$\pm$0.3} & \best{87.3$\pm$0.1} \\
+RanPAC (+our placement) & \best{96.2$\pm$0.3} & 87.3$\pm$0.1 \\
 \midrule
-CLIP-final MAS & \todo{} & 82.8$\pm$0.5$^{n2}$ \\
+CLIP-final MAS adapter & 94.1$^{*,t10}$ & 82.8$\pm$0.5$^{n2}$ \\
+CLIP RanPAC (+our placement) & 96.6$\pm$0.1$^{t10}$ & \best{89.6$\pm$0.0} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \subsection{Capacity-matched controls}
 \label{sec:capacity}
-\todo{h354 done (98.22/98.35 C10); h1024 + LoRA + C100 running in compare
-chain; fill table T5}
+On Split CIFAR-10 (layer4), widening the adapter from $h{=}256$ (MAS
+98.06$\pm$0.11) to the multi-tap-input-matched $h{=}354$ (98.22$^*$) and
+further to $h{=}1024$ (97.87$^*$) does \emph{not} reproduce the multi-tap gain
+--- the widest adapter is in fact \emph{worse} than the narrowest. Parameter
+count is not the active ingredient; placement is.
+\todo{EWC h1024, LoRA rows, C100 capacity from compare chain; 5-seed
+promotion via phase2}
 
 \subsection{Beyond frozen features (conditional)}
 \label{sec:beyond}
