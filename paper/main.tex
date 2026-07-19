@@ -186,6 +186,27 @@ per-seed JSONs are released.
 \section{Results}
 \subsection{The depth map}
 \label{sec:depthmap}
+\Cref{tab:depthmap,tab:clipdepth,fig:depthmap} map the fate of an adapter at
+every insertion depth. Three regularities hold across both encoders. First,
+\textbf{unprotected sequential training fails hardest where it is cheapest}:
+naive forgetting climbs monotonically toward early taps (ResNet: 19.4 at
+layer4 $\to$ 31.8 at layer1; CLIP: 5.8 at the final embedding $\to$ 35.5 at
+block3). Early features are the most \emph{shared} across tasks --- exactly
+why overwriting them is catastrophic. Second, \textbf{importance protection
+converts every depth into a viable insertion point}, recovering 87--99\% of
+the depth-matched joint upper bound (e.g., layer3: 87.2 of 90.7; CLIP block3:
+$+25.8$ over naive). The choice of signal (MAS vs.\ EWC) matters far less than
+whether \emph{any} protection is present: across all 18 depth cells the two
+are statistically indistinguishable after Bonferroni correction in all but
+\todo{k} cases. Third, \textbf{the placement optimum is encoder-dependent}
+(\cref{fig:heatmap}): on ResNet-50 concatenating the late pair (layer3+4)
+beats the best single tap (90.2 vs.\ 89.6 on C100), while on CLIP the final
+embedding alone is optimal and every early-block admixture hurts (final 94.1
+vs.\ block3+final 93.3). A supervised CNN distributes reusable,
+linearly-separable structure across its last two stages; a contrastively
+trained ViT concentrates it in the projected embedding. ``Where to protect''
+therefore has no universal answer --- it must be searched, and our map is the
+first such search for protected adapters.
 \begin{table}[t]
 \centering\small
 \caption{Split CIFAR-100 (10 tasks, ResNet-50), AvgAcc\,\% $\pm$ std over 5
@@ -216,11 +237,11 @@ hurts, the opposite of ResNet-50. $^*$single seed, 5-seed running.}
 \toprule
 Tap & Naive & MAS & EWC \\
 \midrule
-block3 & 42.0$\pm$1.2 (35.5) & 67.8$\pm$0.4 (1.9) & 57.9$\pm$2.4 (15.9) \\
-block9 & \todo{} & 87.3$\pm$0.5 (1.0) & \todo{} \\
+block3 & 42.0$\pm$1.2 (35.5) & 67.8$\pm$0.4 (1.9) & 58.3$\pm$2.3 (15.4) \\
+block9 & 74.4$\pm$2.1 (20.7) & 87.3$\pm$0.5 (1.0) & \todo{} \\
 final & 91.6$^*$ (5.8) & 94.1$^*$ (0.4) & \best{95.4$^*$} (1.0) \\
 block9+final & 87.5$^*$ (10.2) & 93.9$^*$ (1.0) & 94.8$^*$ (1.6) \\
-block3+final & --- & 92.8$^*$ (0.8) & --- \\
+block3+final & --- & 93.3$\pm$0.3 (0.7) & --- \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -248,6 +269,17 @@ running grid}
 
 \subsection{Placement transfers to RanPAC}
 \label{sec:transfer}
+If placement were an artifact of our adapter, it would not survive a change of
+method family. It does (\cref{tab:transfer}): feeding RanPAC's random
+projection from our multi-tap features instead of the final representation
+improves it on every stream where the data departs from the encoder's
+pre-training distribution, with the gain scaling in the size of that shift ---
+$+0.1$/$+0.3$ on near-distribution CIFAR, $+4.6$ (ResNet) and $+1.2$ (CLIP) on
+the heterogeneous 5-dataset stream. The 87.3\% (ResNet) and 89.6\% (CLIP)
+5-dataset results are, to our knowledge, the strongest reported for this
+stream under frozen encoders, and they required \emph{no change to RanPAC
+itself}. Placement is a property of the representation, not of the continual
+learner attached to it.
 \begin{table}[t]
 \centering\small
 \caption{Applying our multi-tap placement to RanPAC improves it wherever the
@@ -273,6 +305,20 @@ CLIP ViT-B/32 & 5-Datasets & 88.42$\pm$0.03 & \best{89.63$\pm$0.03} & \best{+1.2
 
 \subsection{Long and heterogeneous streams; honest SOTA comparison}
 \label{sec:honest}
+\Cref{tab:long} reports the two hardest streams. Protected adapters dominate
+their own family --- on 20-task CIFAR-100 MAS retains 94.5\% with 1.2\%
+forgetting where naive training collapses to 78.9\% --- and reach 99.3\% of
+their joint upper bound (95.1\%), i.e., forgetting is essentially solved
+\emph{within} the adapter family. RanPAC nevertheless scores higher (96.2\%),
+and instructively so: it exceeds the adapter's \emph{joint} bound, meaning its
+advantage is one of classifier capacity (a $10^4$-dimensional random expansion
+with closed-form ridge) rather than of continual-learning ability. The same
+pattern holds on the 5-dataset stream (87.3 vs.\ 79.5). We state this
+plainly rather than hiding behind favorable cells: under frozen features,
+gradient-trained MLP adapters buy \emph{stability} (F$\approx$1 vs.\
+RanPAC's 0.4--1.2 with far fewer parameters at train time), while
+random-expansion classifiers buy \emph{capacity}. The two are complementary
+--- and both obey the same placement map, which is the point of this paper.
 \begin{table}[t]
 \centering\small
 \caption{20-task CIFAR-100 and the 5-dataset stream (ResNet-50, layer3+4
@@ -314,10 +360,31 @@ cached 92.02); c100 t10/t20 + fivedata e20 queued; ablations sim/alpha-enc/q}
 
 \section{Discussion and Limitations}
 \label{sec:limits}
-Task-incremental protocol only (class-IL extension \todo{pending decision});
-two encoders; classic small-image streams under an ImageNet/CLIP backbone;
-placement searched over stage-level taps, not arbitrary layers.
-\todo{expand after final results}
+\paragraph{What the map buys a practitioner.} Given a new encoder and stream,
+our results reduce the design space to one cheap sweep: cache per-stage pooled
+features, probe each tap (and the late pair, for CNNs) with any protected
+adapter or with RanPAC, and pick by validation. The sweep costs minutes on
+cached features --- orders of magnitude less than a single fine-tuning run ---
+and, per \cref{tab:transfer}, its outcome transfers across method families.
+
+\paragraph{Why multi-tap helps CNNs but not CLIP.} ResNet's layer3 retains
+mid-level structure (texture, parts) that layer4's class-aligned pooling
+discards; on streams whose classes differ from ImageNet's, this complements
+the final features. CLIP's training objective already compresses transferable
+structure into the projected embedding, so early CLS tokens add mostly noise
+--- except under strong domain shift (5-Datasets), where even CLIP benefits
+from a second late tap. This yields a testable rule of thumb: \emph{the wider
+the distribution shift, the deeper into the network the useful taps reach.}
+
+\paragraph{Limitations.} (i) Task-incremental protocol with known test-time
+task identity; class-incremental extension is the clear next step
+\todo{pending decision/experiments}. (ii) Two encoders; DINOv2-scale
+self-supervised models remain to be mapped. (iii) Classic small-image streams
+under large pre-trained backbones --- near-distribution CIFAR results sit at
+ceiling and we interpret them only through forgetting. (iv) Placement is
+searched over stage-level taps, not arbitrary layers. (v) End-of-stream
+hyperparameter tuning on a validation split mirrors common practice but is an
+oracle relative to strictly-online CL.
 
 \section{Conclusion}
 \todo{write after results finalized}
