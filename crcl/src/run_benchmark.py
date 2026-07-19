@@ -1,11 +1,17 @@
 """Full benchmark grid: {encoder x depth} x {dataset} x {method} x {seed} -> CSV.
 
 Reads cached (dataset, backbone, depth) feature files; each CL run is a small MLP,
-seconds-to-minutes on CPU. Writes one JSON per run + an aggregate CSV.
+seconds-to-minutes on CPU. Writes one JSON per run + appends an aggregate CSV row
+per (depth, method).
+
+Depth spec supports multi-tap concatenation: "layer3+layer4".
+Per-method tuned hyperparameters can be supplied via --tuned-file (JSON produced
+by run_sweep.py: {method: {param: value}}).
 """
 import argparse
 import copy
 import csv
+import json
 import os
 import time
 
@@ -18,38 +24,35 @@ from train_cl import run_joint, run_sequence
 SEEDS_FAST = [42, 123, 456]
 SEEDS_FULL = [42, 123, 456, 789, 1337]
 
-# method label -> config overrides. Pure regularizers via "reg:<signal>".
 METHODS = {
     "naive": {"method": "naive"},
     "l2sp": {"method": "reg:l2"},
     "ewc": {"method": "reg:ewc"},
+    "si": {"method": "si"},
+    "lwf": {"method": "lwf"},
+    "er": {"method": "er"},
     "mas": {"method": "reg:mas"},
     "sfxphi": {"method": "reg:sfxphi"},
-    "sf": {"method": "reg:sf"},
-    "phi": {"method": "reg:phi"},
-    "wanda": {"method": "reg:wanda"},
-    "taylor": {"method": "reg:taylor"},
-    "ours_framework": {"method": "ours"},        # reserve + SF×phi + norm cap
-    "mas_framework": {"method": "reg:mas", "gamma": 100.0, "beta_res": 0.0},  # cap ablation
+    "ours_framework": {"method": "ours"},
     "joint": {"method": "joint"},
 }
+DEFAULT_METHODS = ["naive", "ewc", "si", "lwf", "er", "mas", "joint"]
 
 
-def cache_exists(dataset, backbone, depth):
-    return os.path.exists(os.path.join(
-        CACHE_DIR, f"{dataset}_{backbone}_{depth}_{split_probe(dataset)}"))
+def bwt(A):
+    T = A.shape[0]
+    if T < 2:
+        return 0.0
+    return float(np.mean([A[T - 1, t] - A[t, t] for t in range(T - 1)]))
 
 
-def split_probe(dataset):
-    return "train.pt"  # helper for existence check filename tail
-
-
-def run_cell(dataset, backbone, depth, method_label, seed, alpha, n_tasks):
+def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update(METHODS[method_label])
-    cfg.update({"dataset": dataset, "backbone": f"{backbone}_{depth}",
-                "seed": seed, "alpha": alpha, "n_tasks": n_tasks})
-    tag = f"{dataset}_{backbone}_{depth}_{method_label}"
+    cfg.update(tuned.get(method_label, {}))
+    cfg.update({"dataset": dataset, "backbone": backbone_full,
+                "seed": seed, "n_tasks": n_tasks})
+    tag = f"{dataset}_{backbone_full}_{method_label}"
     t0 = time.time()
     if cfg["method"] == "joint":
         per_task = run_joint(cfg)
@@ -67,38 +70,43 @@ def run_cell(dataset, backbone, depth, method_label, seed, alpha, n_tasks):
     return m
 
 
-def bwt(A):
-    T = A.shape[0]
-    if T < 2:
-        return 0.0
-    return float(np.mean([A[T - 1, t] - A[t, t] for t in range(T - 1)]))
-
-
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--dataset", required=True)
-    p.add_argument("--backbone", required=True)
-    p.add_argument("--depths", nargs="*", required=True)
-    p.add_argument("--methods", nargs="*", default=list(METHODS.keys()))
+    p.add_argument("--backbone", required=True, help="encoder name, e.g. resnet50")
+    p.add_argument("--depths", nargs="*", required=True,
+                   help='depth specs, e.g. layer4 "layer3+layer4"; use "-" for legacy/pixels')
+    p.add_argument("--methods", nargs="*", default=DEFAULT_METHODS)
     p.add_argument("--alpha", type=float, default=10.0)
+    p.add_argument("--tuned-file", default=None)
     p.add_argument("--n-tasks", type=int, default=None)
     p.add_argument("--full", action="store_true", help="5 seeds instead of 3")
     a = p.parse_args()
     seeds = SEEDS_FULL if a.full else SEEDS_FAST
-    n_tasks = a.n_tasks or (5 if a.dataset == "cifar10" else 10)
+    n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist") else 10)
+    tuned = {}
+    if a.tuned_file and os.path.exists(a.tuned_file):
+        tuned = json.load(open(a.tuned_file))
+        print(f"tuned params: {tuned}", flush=True)
+    for m in tuned.values():
+        m.setdefault("alpha", a.alpha)
+    base_tuned = {m: tuned.get(m, {"alpha": a.alpha}) for m in a.methods}
 
     rows = []
     for depth in a.depths:
-        train_cache = os.path.join(
-            CACHE_DIR, f"{a.dataset}_{a.backbone}_{depth}_train.pt")
-        if not os.path.exists(train_cache):
-            print(f"MISSING cache {train_cache} — skip depth {depth}", flush=True)
-            continue
+        backbone_full = a.backbone if depth == "-" else f"{a.backbone}_{depth}"
+        # existence check on the first tap of the spec
+        if depth != "-":
+            first = depth.split("+")[0]
+            probe = os.path.join(CACHE_DIR, f"{a.dataset}_{a.backbone}_{first}_train.pt")
+            if not os.path.exists(probe):
+                print(f"MISSING cache {probe} — skip depth {depth}", flush=True)
+                continue
         for method in a.methods:
             metrics = []
             for seed in seeds:
-                m = run_cell(a.dataset, a.backbone, depth, method, seed,
-                             a.alpha, n_tasks)
+                m = run_cell(a.dataset, backbone_full, method, seed, n_tasks,
+                             base_tuned)
                 metrics.append(m)
             agg = {k: (float(np.mean([mm[k] for mm in metrics])),
                        float(np.std([mm[k] for mm in metrics])))

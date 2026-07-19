@@ -1,12 +1,24 @@
 """Sequential continual-learning trainer over cached features.
 
-Methods:
-  ours  — reserve loss on task 1 + SF×phi-protected training on tasks 2..T
-  naive — plain sequential fine-tuning (lower bound)
-  joint — all tasks pooled, multi-head (upper bound)
+Methods (cfg["method"]):
+  naive          — plain sequential fine-tuning (lower bound)
+  reg:<signal>   — pure importance-weighted quadratic penalty; signal in
+                   {mas, ewc, l2, sfxphi, sf, phi, wanda, taylor}
+                   ("mas_adapter" is an alias for reg:mas)
+  si             — Synaptic Intelligence (online path-integral importance)
+  lwf            — Learning without Forgetting (distill previous heads on current data)
+  er             — Experience Replay (small class-balanced feature buffer)
+  ours           — Phase-1 framework (reserve + SF×phi + norm cap); kept as ablation
+  joint          — all tasks pooled, multi-head (upper bound)
+
+Backbone naming for cached features:
+  "pixels" / "resnet18"                  → legacy single file  {ds}_{bb}_{split}.pt (raw)
+  "<enc>_<depth>"                        → {ds}_<enc>_<depth>_{split}.pt (z-scored)
+  "<enc>_<d1>+<d2>+..." (multi-tap)      → per-tap z-score (train stats), concat
 """
 import copy
 import os
+import subprocess
 
 import numpy as np
 import torch
@@ -20,11 +32,45 @@ from reserve import (claim_units, dormancy_fraction, make_reserved_masks,
                      mean_activations, reserve_loss, verify_dormant)
 from tasks import make_splits, subsample, task_tensors
 
+PARAM_NAMES = ("fc1", "fc2")
+LEGACY_BACKBONES = ("pixels", "resnet18")  # raw features, single cache file
+
+
+def git_hash():
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def _load_split(dataset, backbone, split):
+    if backbone in LEGACY_BACKBONES:
+        blob = torch.load(os.path.join(CACHE_DIR, f"{dataset}_{backbone}_{split}.pt"))
+        return blob["features"], blob["labels"]
+    enc, depth_spec = backbone.rsplit("_", 1)
+    feats, labels = [], None
+    for d in depth_spec.split("+"):
+        blob = torch.load(os.path.join(CACHE_DIR, f"{dataset}_{enc}_{d}_{split}.pt"))
+        feats.append(blob["features"])
+        labels = blob["labels"]
+    return feats, labels
+
 
 def load_cached(dataset: str, backbone: str):
-    tr = torch.load(os.path.join(CACHE_DIR, f"{dataset}_{backbone}_train.pt"))
-    te = torch.load(os.path.join(CACHE_DIR, f"{dataset}_{backbone}_test.pt"))
-    return tr["features"], tr["labels"], te["features"], te["labels"]
+    """Returns (xtr, ytr, xte, yte). Multi-tap: per-tap z-score from TRAIN stats."""
+    tr, ytr = _load_split(dataset, backbone, "train")
+    te, yte = _load_split(dataset, backbone, "test")
+    if backbone in LEGACY_BACKBONES:
+        return tr, ytr, te, yte
+    xtr_parts, xte_parts = [], []
+    for ftr, fte in zip(tr, te):
+        mu, sd = ftr.mean(0), ftr.std(0) + 1e-6
+        xtr_parts.append((ftr - mu) / sd)
+        xte_parts.append((fte - mu) / sd)
+    return torch.cat(xtr_parts, 1), ytr, torch.cat(xte_parts, 1), yte
 
 
 @torch.no_grad()
@@ -36,20 +82,109 @@ def evaluate(model, x, y, task_id, batch_size: int = 2048, zero_h1=None, zero_h2
     return correct / len(x)
 
 
+def _params(model):
+    out = {}
+    for n in PARAM_NAMES:
+        mod = getattr(model, n)
+        out[n] = mod.weight
+        out["b_" + n] = mod.bias
+    return out
+
+
 def _snapshot(model):
-    return {
-        "w": {n: getattr(model, n).weight.detach().clone() for n in ("fc1", "fc2")},
-        "b": {n: getattr(model, n).bias.detach().clone() for n in ("fc1", "fc2")},
-    }
+    return {k: v.detach().clone() for k, v in _params(model).items()}
 
 
-def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None):
+class SIState:
+    """Synaptic Intelligence accumulators over the adapter parameters."""
+
+    def __init__(self, model, xi=1e-3):
+        self.xi = xi
+        self.omega = {k: torch.zeros_like(v) for k, v in _params(model).items()}
+        self._step_acc = None
+        self._w_task_start = None
+
+    def start_task(self, model):
+        self._step_acc = {k: torch.zeros_like(v) for k, v in _params(model).items()}
+        self._w_task_start = _snapshot(model)
+
+    def pre_step(self, model):
+        self._g = {k: (v.grad.detach().clone() if v.grad is not None else None)
+                   for k, v in _params(model).items()}
+        self._w_pre = _snapshot(model)
+
+    def post_step(self, model):
+        for k, v in _params(model).items():
+            if self._g[k] is not None:
+                delta = v.detach() - self._w_pre[k]
+                self._step_acc[k] += -self._g[k] * delta
+
+    def end_task(self, model):
+        w_end = _snapshot(model)
+        for k in self.omega:
+            total_delta = w_end[k] - self._w_task_start[k]
+            self.omega[k] += self._step_acc[k].clamp(min=0) / (total_delta ** 2 + self.xi)
+
+    def normalized(self):
+        return {k: v / (v.max() + 1e-12) for k, v in self.omega.items()}
+
+
+class ReplayBuffer:
+    """Class-balanced feature buffer over previous tasks."""
+
+    def __init__(self, per_class, seed):
+        self.per_class = per_class
+        self.g = torch.Generator().manual_seed(seed)
+        self.x, self.y, self.t = [], [], []
+
+    def add_task(self, task_id, x, y):
+        for c in y.unique():
+            idx = (y == c).nonzero(as_tuple=True)[0]
+            pick = idx[torch.randperm(len(idx), generator=self.g)[:self.per_class]]
+            self.x.append(x[pick])
+            self.y.append(y[pick])
+            self.t.append(torch.full((len(pick),), task_id, dtype=torch.long))
+
+    def __len__(self):
+        return sum(len(x) for x in self.x)
+
+    def sample(self, n):
+        x = torch.cat(self.x); y = torch.cat(self.y); t = torch.cat(self.t)
+        idx = torch.randperm(len(x), generator=self.g)[:n]
+        return x[idx], y[idx], t[idx]
+
+
+def _replay_loss(model, buffer, n):
+    xb, yb, tb = buffer.sample(n)
+    loss = 0.0
+    for k in tb.unique():
+        sel = tb == k
+        _, _, logits = model(xb[sel], int(k))
+        loss = loss + F.cross_entropy(logits, yb[sel], reduction="sum")
+    return loss / len(xb)
+
+
+def _lwf_loss(model, teacher, xb, prev_tasks, T):
+    loss = 0.0
+    for k in prev_tasks:
+        with torch.no_grad():
+            _, _, t_logits = teacher(xb, k)
+        _, _, s_logits = model(xb, k)
+        loss = loss + F.kl_div(
+            F.log_softmax(s_logits / T, dim=1),
+            F.softmax(t_logits / T, dim=1),
+            reduction="batchmean") * (T * T)
+    return loss / max(1, len(prev_tasks))
+
+
+def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None,
+               si_state=None, teacher=None, prev_tasks=None, buffer=None):
     dl = DataLoader(TensorDataset(x, y), batch_size=cfg["batch_size"], shuffle=True)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=0.0)
     denom = None
     if theta_old is not None:
-        denom = torch.sqrt(sum((w ** 2).sum() for w in theta_old["w"].values()))
+        denom = torch.sqrt(sum((theta_old[n] ** 2).sum() for n in PARAM_NAMES))
     for _ in range(cfg["epochs"]):
         for xb, yb in dl:
             h1, h2, logits = model(xb, task_id)
@@ -57,28 +192,32 @@ def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None
             if res_masks is not None and cfg["beta_res"] > 0:
                 loss = loss + cfg["beta_res"] * reserve_loss(h1, h2, res_masks)
             if S is not None and cfg["alpha"] > 0:
-                prot = 0.0
-                for n in ("fc1", "fc2"):
-                    mod = getattr(model, n)
-                    prot = prot + (S[n] * (mod.weight - theta_old["w"][n]) ** 2).sum()
-                    prot = prot + (S["b_" + n] * (mod.bias - theta_old["b"][n]) ** 2).sum()
+                prot = sum((S[k] * (v - theta_old[k]) ** 2).sum()
+                           for k, v in _params(model).items())
                 loss = loss + cfg["alpha"] * prot
             if theta_old is not None and cfg["gamma"] > 0:
-                dsq = sum(((getattr(model, n).weight - theta_old["w"][n]) ** 2).sum()
-                          for n in ("fc1", "fc2"))
+                dsq = sum(((getattr(model, n).weight - theta_old[n]) ** 2).sum()
+                          for n in PARAM_NAMES)
                 rel = torch.sqrt(dsq + 1e-12) / denom
                 loss = loss + cfg["gamma"] * torch.relu(rel - cfg["beta_crit"]) ** 2
+            if teacher is not None and prev_tasks:
+                loss = loss + cfg["lwf_lambda"] * _lwf_loss(
+                    model, teacher, xb, prev_tasks, cfg["lwf_T"])
+            if buffer is not None and len(buffer) > 0:
+                loss = loss + cfg["er_weight"] * _replay_loss(
+                    model, buffer, min(cfg["batch_size"], len(buffer)))
             opt.zero_grad()
             loss.backward()
-            opt.step()
+            if si_state is not None:
+                si_state.pre_step(model)
+                opt.step()
+                si_state.post_step(model)
+            else:
+                opt.step()
 
 
 def _trim_and_freeze_head(model, task_id, task_x, tau, enabled):
-    """Zero head columns reading from units dormant on this task's data, then freeze.
-
-    A dormant unit contributes ~0 to this head now; zeroing its column makes the
-    head provably immune to that unit being woken by a FUTURE task.
-    """
+    """Zero head columns reading from units dormant on this task's data, then freeze."""
     if enabled:
         _, a2 = mean_activations(model, task_x)
         with torch.no_grad():
@@ -99,9 +238,6 @@ def run_sequence(cfg):
 
     method = cfg["method"]
     use_reserve = method == "ours"
-    # Pure importance-penalty methods (the paper's primary path): no reserve loss,
-    # no delta-norm cap — the framework ablation showed both HURT. "mas_adapter" ==
-    # "reg:mas"; "reg:<signal>" selects any importance signal for the pure penalty.
     if method == "mas_adapter":
         pure_signal = "mas"
     elif method.startswith("reg:"):
@@ -109,12 +245,17 @@ def run_sequence(cfg):
     else:
         pure_signal = None
     use_pure = pure_signal is not None
-    # Zero the framework knobs for the pure path so cfg defaults (gamma=100) can't
-    # silently re-enable the harmful delta-norm cap.
-    cfg_pure = {**cfg, "gamma": 0.0, "beta_res": 0.0} if use_pure else cfg
+    use_si = method == "si"
+    use_lwf = method == "lwf"
+    use_er = method == "er"
+    # Pure/SI paths must not inherit the harmful framework knobs (gamma norm cap,
+    # reserve loss) from cfg defaults.
+    cfg_clean = {**cfg, "gamma": 0.0, "beta_res": 0.0}
 
     R = make_reserved_masks(cfg["d_hidden"], cfg["q"], seed=cfg["seed"]) if use_reserve else None
     R_unclaimed = copy.deepcopy(R) if use_reserve else None
+    si_state = SIState(model, cfg["si_xi"]) if use_si else None
+    buffer = ReplayBuffer(cfg["er_per_class"], cfg["seed"] + 7) if use_er else None
 
     A = np.zeros((T, T))
     stats = {"dormancy": None, "claimed_per_task": [], "delta_rel": []}
@@ -122,35 +263,55 @@ def run_sequence(cfg):
     for t in range(T):
         x, y = train_sets[t]
         model.add_head(t, len(splits[t]))
-        if t == 0 or (not use_reserve and not use_pure):
-            train_task(model, x, y, t, cfg,
-                       res_masks=R if use_reserve else None)
-        else:
+        if use_si:
+            si_state.start_task(model)
+
+        if t == 0:
+            train_task(model, x, y, t, cfg if use_reserve else cfg_clean,
+                       res_masks=R if use_reserve else None, si_state=si_state)
+        elif use_reserve or use_pure:
             prev_data = [(k,) + subsample(*train_sets[k], cfg["phi_samples"], seed=cfg["seed"] + k)
                          for k in range(t)]
-            importance_method = pure_signal if use_pure else cfg["importance"]
-            S = importance(model, prev_data, list(range(t)), method=importance_method)
+            sig = pure_signal if use_pure else cfg["importance"]
+            S = importance(model, prev_data, list(range(t)), method=sig)
             theta_old = _snapshot(model)
-            train_task(model, x, y, t, cfg_pure if use_pure else cfg,
+            train_task(model, x, y, t, cfg if use_reserve else cfg_clean,
                        res_masks=R_unclaimed if use_reserve else None,
                        S=S, theta_old=theta_old)
             with torch.no_grad():
-                dsq = sum(((getattr(model, n).weight - theta_old["w"][n]) ** 2).sum()
-                          for n in ("fc1", "fc2"))
-                den = torch.sqrt(sum((w ** 2).sum() for w in theta_old["w"].values()))
+                dsq = sum(((getattr(model, n).weight - theta_old[n]) ** 2).sum()
+                          for n in PARAM_NAMES)
+                den = torch.sqrt(sum((theta_old[n] ** 2).sum() for n in PARAM_NAMES))
                 stats["delta_rel"].append(float(torch.sqrt(dsq) / den))
+        elif use_si:
+            theta_old = _snapshot(model)
+            train_task(model, x, y, t, cfg_clean,
+                       S=si_state.normalized(), theta_old=theta_old,
+                       si_state=si_state)
+        elif use_lwf:
+            teacher = copy.deepcopy(model)
+            teacher.eval()
+            for p in teacher.parameters():
+                p.requires_grad_(False)
+            train_task(model, x, y, t, cfg_clean,
+                       teacher=teacher, prev_tasks=list(range(t)))
+        elif use_er:
+            train_task(model, x, y, t, cfg_clean, buffer=buffer)
+        else:  # naive
+            train_task(model, x, y, t, cfg_clean)
+
+        if use_si:
+            si_state.end_task(model)
+        if use_er:
+            buffer.add_task(t, x, y)
 
         if method == "naive" and t == 0:
-            # control: accidental dormancy right after task 1, same timepoint
-            # as the ours-side measurement below (comparing after-1-task vs
-            # after-T-tasks states would invalidate the comparison)
             rand_masks = make_reserved_masks(cfg["d_hidden"], cfg["q"],
                                              seed=cfg["seed"] + 999)
             stats["accidental_dormancy"] = dormancy_fraction(
                 model, x, rand_masks, tau=cfg["tau_dormant"])
 
         if use_reserve and t == 0:
-            # dormancy verification on task-1 data
             dormant, frac = verify_dormant(model, x, R, tau=cfg["tau_dormant"])
             xt0, yt0 = test_sets[0]
             acc_plain = evaluate(model, xt0, yt0, 0)
@@ -174,7 +335,7 @@ def run_sequence(cfg):
         for k in range(t + 1):
             A[t, k] = evaluate(model, *test_sets[k], k)
 
-    return {"config": cfg, "acc_matrix": A.tolist()}, A, stats
+    return {"config": cfg, "acc_matrix": A.tolist(), "git": git_hash()}, A, stats
 
 
 def run_joint(cfg):
@@ -182,13 +343,13 @@ def run_joint(cfg):
     xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
     n_classes = int(ytr.max()) + 1
     splits = make_splits(n_classes, cfg["n_tasks"])
-    T = cfg["n_tasks"]
     model = Adapter(d_in=xtr.shape[1], d_hidden=cfg["d_hidden"])
     xs, ys, ts = [], [], []
     for t, g in enumerate(splits):
         model.add_head(t, len(g))
         x, y = task_tensors(xtr, ytr, g)
-        xs.append(x); ys.append(y); ts.append(torch.full((len(y),), t, dtype=torch.long))
+        xs.append(x); ys.append(y)
+        ts.append(torch.full((len(y),), t, dtype=torch.long))
     x_all, y_all, t_all = torch.cat(xs), torch.cat(ys), torch.cat(ts)
     dl = DataLoader(TensorDataset(x_all, y_all, t_all),
                     batch_size=cfg["batch_size"], shuffle=True)
@@ -204,6 +365,5 @@ def run_joint(cfg):
             opt.zero_grad()
             loss.backward()
             opt.step()
-    per_task = [evaluate(model, *task_tensors(xte, yte, g), t)
-                for t, g in enumerate(splits)]
-    return per_task
+    return [evaluate(model, *task_tensors(xte, yte, g), t)
+            for t, g in enumerate(splits)]

@@ -44,7 +44,7 @@ def main():
     cfg = dict(common.DEFAULT_CONFIG)
     cfg.update({"epochs": 3, "seed": 42})
 
-    for method in ["naive", "ours", "mas_adapter"]:
+    for method in ["naive", "ours", "mas_adapter", "reg:ewc", "si", "lwf", "er"]:
         cfg["method"] = method
         payload, A, stats = train_cl.run_sequence(cfg)
         assert A.shape == (5, 5)
@@ -56,7 +56,7 @@ def main():
             print("  dormancy:", stats["dormancy"])
             print("  claimed per task:", stats["claimed_per_task"])
             print("  delta_rel:", [round(d, 4) for d in stats["delta_rel"]])
-        else:
+        elif method == "naive":
             print("  accidental dormancy:", stats["accidental_dormancy"])
 
     cfg["method"] = "joint"

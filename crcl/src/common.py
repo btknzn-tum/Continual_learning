@@ -17,6 +17,8 @@ def set_seed(s: int):
 
 
 def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
 
@@ -40,8 +42,14 @@ DEFAULT_CONFIG = {
     "lr": 1e-3,
     "epochs": 20,
     "batch_size": 128,
-    # method switches: "ours" | "naive" | "joint"
-    "method": "ours",
+    # method: naive | reg:<signal> | si | lwf | er | ours | joint
+    "method": "reg:mas",
     "head_trim": True,
+    # SI / LwF / ER hyperparameters
+    "si_xi": 1e-3,
+    "lwf_lambda": 1.0,
+    "lwf_T": 2.0,
+    "er_per_class": 20,
+    "er_weight": 1.0,
     "seed": 42,
 }
