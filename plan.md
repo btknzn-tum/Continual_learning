@@ -1,183 +1,138 @@
-# PLAN — Regularization-Based Continual Learning in Adapters: A Benchmark Study
-## Method: importance-weighted adapters (MAS as the strong default), across backbone depths and vision encoders
+# PLAN — MAS-Protected Adapters for Continual Learning:
+## A Systematic Benchmark across Insertion Depths and Vision Encoders (Q1-journal target)
+
+**Working title:** *"Where to Adapt and How to Protect: A Systematic Study of
+Importance-Regularized Adapters for Continual Learning across Encoder Depths."*
+
+**Target venues (Q1):** Neural Networks → Pattern Recognition → TNNLS (in that order;
+all value rigorous empirical studies with reproducible code).
 
 ---
 
-## 0. WHAT CHANGED AND WHY (pivot record — read first)
+## 0. WHAT WE KNOW (Phase-1, laptop, completed — the pivot record)
 
-The original idea was a novel three-part method (reserve loss to manufacture dormant
-capacity + SF×φ importance + a soft protection framework with a delta-norm cap).
-Phase-1 experiments on this laptop **falsified the framework and the SF×φ signal as the
-winner**, but produced a clean, defensible empirical result. The decisive numbers
-(Split CIFAR-10, frozen ResNet-18 features, 3 seeds):
+Phase-1 falsified our original novel framework (reserve loss + SF×φ + norm cap) and
+identified the winner. Split CIFAR-10, frozen ResNet-18 final features, adapter, 3 seeds:
 
-| Config | AvgAcc | Forgetting | Note |
-|--------|--------|-----------|------|
-| naive (no protection) | 89.40 ± 1.54 | 10.12 ± 1.87 | forgetting is real & large |
-| ours (reserve + SF×φ + norm-cap) | 95.31 ± 0.78 | 1.40 ± 1.14 | the full fancy method |
-| SF×φ **signal alone** (no reserve/cap) | 96.09 ± 0.05 | 0.56 ± 0.07 | framework was HURTING us |
-| MAS + our framework | 96.53 ± 0.68 | 0.86 ± 0.80 | framework hurts MAS too |
-| **MAS signal alone** | **96.92 ± 0.24** | **0.49 ± 0.25** | winner |
-| EWC signal alone | 94.33 ± 1.89 | 3.75 ± 2.21 | unstable (Fisher vanishes at min) |
-| joint (upper bound) | 97.25 ± 0.16 | 0.00 | — |
+| Config | AvgAcc | Forgetting |
+|--------|--------|-----------|
+| naive | 89.40 ± 1.54 | 10.12 ± 1.87 |
+| EWC (pure penalty) | 94.33 ± 1.89 | 3.75 ± 2.21 |
+| ours-framework (reserve+SF×φ+cap) | 95.31 ± 0.78 | 1.40 ± 1.14 |
+| SF×φ pure | 96.09 ± 0.05 | 0.56 ± 0.07 |
+| **MAS pure** | **96.92 ± 0.24** | **0.49 ± 0.25** | 
+| joint (upper bound) | 97.25 ± 0.16 | 0.00 |
 
-**Two findings drive the new plan:**
-1. The reserve-loss + delta-norm "framework" is a **net negative** — it costs plasticity
-   for both signals without buying enough stability. Drop it. Pure importance-weighted
-   quadratic protection is what works.
-2. Among pure importance signals, **MAS wins**: it measures output sensitivity directly
-   (unlabeled, on previous-task data) and — unlike EWC's CE-gradient Fisher, which
-   collapses at a task minimum → seed-unstable — MAS's `‖output‖²` gradient does not
-   vanish, giving the best forgetting AND the tightest variance.
+Findings: (1) the extra "framework" hurts every signal — pure importance-weighted
+quadratic penalty is the right mechanism; (2) **MAS is the best signal** (direct output
+sensitivity, unlabeled, does not vanish at task minima like EWC's Fisher → best mean AND
+lowest variance). MNIST agreed. Split-MNIST full results also archived in `crcl/results/`.
 
-**The paper is therefore NOT "a new method."** "MAS on adapters" is a known combination
-and would be rejected for novelty alone. The contribution is the **systematic benchmark**:
-*where* trainable adapter capacity should attach in a frozen encoder, *which* importance
-signal to protect it with, and *how this interacts with the encoder* (CNN vs. CLIP-ViT) —
-delivered as a reproducible, multi-seed, multi-backbone, multi-depth study with MAS
-established as the strong, stable default. SF×φ and the reserve loss survive as ablations
-(honest negative results: "structural importance needs depth; manufactured dormancy does
-not help soft regularization").
-
-Working title: **"Where and How to Protect Adapters: A Benchmark of Regularization-Based
-Continual Learning across Encoder Depths and Vision Backbones."**
+**Paper thesis:** for frozen-encoder + adapter continual learning, MAS-protected adapters
+are a strong, stable, rehearsal-free default — and *where* the adapter attaches (encoder
+depth, single or multi-tap) matters as much as *which* method protects it. Nobody has
+mapped this (method × placement × encoder) space systematically. That map is the paper.
 
 ---
 
-## 1. METHOD (what the primary system is now)
+## 1. SYSTEM UNDER STUDY
 
-Frozen vision encoder → cached features at a chosen **insertion depth** → trainable
-**adapter** (2-layer ReLU MLP bottleneck, no BatchNorm) + one linear head per task
-(task-incremental). Tasks arrive sequentially.
+Frozen encoder → cached features at chosen **insertion point(s)** → trainable **adapter**
+(2-layer ReLU MLP, d_hidden=256, no BatchNorm) → per-task linear heads (task-IL).
+Multi-tap placement = concatenate the cached features of the selected depths (d_in = Σ dims).
 
-Protection for task t ≥ 2 (pure, no framework):
-```
-theta_old = adapter weights snapshot after task t-1
-S = importance(model, previous-task data, method)    # MAS by default
-L = CE(task t) + alpha * sum_w S_w * (w - w_old)^2
-```
-Previous-task heads frozen (`requires_grad=False`) the moment their task ends.
+Primary method — **MAS-adapter** (`reg:mas`): for task t ≥ 2,
+`L = CE + α · Σ_w S_w (w − w_old)²` with `S = mean |∂‖logits_prev‖²/∂w|` computed on
+≤2000 samples/previous task, per-tensor normalized; previous heads frozen. No reserve
+loss, no norm cap (Phase-1 showed they hurt).
 
-`importance(method=...)` supports the full comparison set:
-- **mas** (default): `mean_batches |∂‖logits‖²/∂w|` on previous-task data, unlabeled.
-- **ewc**: diagonal Fisher `mean (∂CE/∂w)²`.
-- **sf**, **phi**, **sfxphi**: the original SynFlow / activation / product signals (ablation).
-- **wanda**, **taylor**: pruning-derived signals (ablation).
-- **l2**: uniform `S=1` (plain L2-SP — cheapest control).
+## 2. BASELINES (4 realistic competitors + 2 bounds, all in the SAME adapter/trainer)
 
-Dropped from the primary path (kept only as ablation switches): reserve loss,
-delta-norm regime cap, head-trim, unit claiming.
+| Method | Type | Why it must be in a Q1 benchmark |
+|--------|------|--------------------------------|
+| **EWC** | quadratic penalty, Fisher | the canonical regularization baseline |
+| **SI** | quadratic penalty, online path-integral importance | importance accumulated DURING training — philosophical opposite of MAS's post-hoc measurement |
+| **LwF** | functional regularization (distill previous heads' logits on current-task data) | the standard data-free distillation representative |
+| **ER** | experience replay, small buffer (20 samples/class) | reviewers always demand a rehearsal reference; small-buffer ER is the honest one |
+| naive | α=0 lower bound | quantifies the problem |
+| joint | pooled upper bound | quantifies the gap |
 
----
+Phase-1 signals (SF×φ, wanda, taylor, L2-SP) move to an appendix ablation.
+To implement: **SI, LwF, ER** (~150 lines total in the existing trainer); EWC exists.
 
-## 2. THE BENCHMARK AXES (this is where "many experiments" come from)
+## 3. BENCHMARK GRID
 
-Full grid = {encoder} × {insertion depth} × {dataset} × {method} × {5 seeds}.
+### 3.1 Datasets (added incrementally, easy → hard)
+1. **Split-MNIST** (5×2, pixels) — sanity; done on laptop, re-verify on server.
+2. **Split CIFAR-10** (5×2) — done for ResNet-18-final; extend to all placements/encoders.
+3. **Split CIFAR-100 (10×10)** — the core field-standard table.
+4. **Split CIFAR-100 (20×5)** — long-stream stress test.
+5. **TinyImageNet (10×20)** — scale + harder features (stretch goal, same caching flow).
 
-### 2.1 Encoders (backbone, frozen, cached once)
-- **resnet18** (ImageNet) — CNN, the CVPR-era standard.
-- **resnet50** (ImageNet) — depth/width scaling check (2048-d).
-- **clip_vitb32** (open_clip, LAION) — vision-language encoder; tests whether the ranking
-  holds for modern ViT features. 512-d image embedding, cached the same way.
+### 3.2 Encoders (frozen, cached once per dataset on the GPU server)
+- **ResNet-50** (ImageNet-V2): taps = GAP(layer1 256-d, layer2 512-d, layer3 1024-d, layer4 2048-d).
+- **CLIP ViT-B/32** (open_clip, LAION-2B): taps = CLS(block3, block6, block9) 768-d + final proj 512-d.
+- ResNet-18 stays as the laptop dev/debug backbone only.
 
-### 2.2 Insertion depth — "adapters used piece-by-piece, not only at the end"
-The core structural axis. Instead of only attaching the adapter to the FINAL pooled
-feature, cache **intermediate** representations and attach the adapter there:
-- **resnet**: global-average-pool the output of `layer1, layer2, layer3, layer4` →
-  64-d / 128-d / 256-d / 512-d fixed vectors. Four depths per image, cached in one pass.
-- **clip_vitb32**: the CLS token after transformer blocks `{3, 6, 9, 12}` (final) →
-  four depths.
-This directly answers "where should continual-learning capacity live?" and multiplies the
-experiment count cheaply (one forward pass caches all depths; each downstream CL run is
-seconds–minutes on CPU).
+### 3.3 Adapter placement — "every combination"
+Per encoder: 4 taps → **15 non-empty subsets** (4 single + 11 multi-tap concats).
+- **Placement study (MAS only):** all 15 subsets × both encoders × CIFAR-100-10 × 5 seeds
+  → the paper's placement heatmap/curve figure. (~150 GPU-cheap runs.)
+- **Method benchmark:** all 6 methods × {4 single taps + best multi-tap combo} × both
+  encoders × {CIFAR-10, CIFAR-100-10, CIFAR-100-20} × 5 seeds → the main tables.
+- MNIST runs only at "pixels" (no encoder).
 
-### 2.3 Datasets / task streams (proper benchmarking, not just a toy)
-- **Split CIFAR-10**: 5 tasks × 2 classes (warm-up, already done for resnet18-final).
-- **Split CIFAR-100**: **10 tasks × 10 classes** — the field-standard task-IL benchmark.
-- **Split CIFAR-100 / 20 tasks × 5 classes** — longer stream, stresses capacity.
-- (Phase 3, if time) TinyImageNet / ImageNet-R via the same caching flow.
+### 3.4 Protocol rigor (Q1 hygiene)
+- Seeds {42,123,456,789,1337}; report mean±std; Welch t-tests + Bonferroni for headline claims.
+- α (and ER buffer, LwF temperature, SI c) tuned ONCE per (encoder, dataset) on seed 42
+  with a 5-point sweep; frozen for the 5-seed runs; sweeps reported in appendix.
+- Metrics from A[k,t]: AvgAcc, Forgetting, Plasticity (learning acc), BWT.
+- One JSON per run (config embedded); aggregate CSVs; every table/figure generated by
+  script from CSVs (`stats.py`, `plots.py`) — no hand-copied numbers.
 
-### 2.4 Methods compared (all in the same adapter + trainer)
-Primary: **mas**. Regularization baselines: ewc, l2-SP. Signal ablations: sfxphi, sf, phi,
-wanda, taylor. Framework ablation: mas / sfxphi WITH the old reserve+cap (to show it hurts).
-Bounds: naive (α=0), joint (pooled). Optional structural baselines: PackNet-in-adapter
-(hard mask), LoRA-seq — added only if the regularization story needs a capacity-based
-contrast.
+## 4. INFRASTRUCTURE — GPU server + GitHub sync (single source of truth)
 
----
+- **Server:** Vast.ai RTX 3090 (connection details in README.md; host/port change per
+  rental). PyTorch + CUDA + open_clip on the server.
+- **Sync rule: code flows ONLY through git.** Local (this laptop) = development + smoke
+  tests; server = all real training. Never edit code directly on the server; if a hotfix
+  happens there, commit+push from the server immediately. Every results file records
+  `git rev-parse HEAD`.
+- **Repo:** https://github.com/btknzn-tum/Continual_learning.git (credentials supplied
+  out-of-band; NEVER committed to files).
+- **Run discipline:** one experiment chain at a time inside `tmux` on the server
+  (`scripts/run_*.sh`), stdout → `logs/`, results → `results/` (gitignored), pulled back
+  to the laptop with `scripts/sync_results.sh` (scp). Caching on the 3090 is minutes per
+  (dataset × encoder), vs ~1 h on the laptop.
 
-## 3. METRICS & PROTOCOL (rigorous)
+## 5. EXECUTION ORDER (server milestones, each = one tmux run, verified before the next)
 
-From accuracy matrix `A[k,t]` (acc on task t after training task k), per run:
-- **AvgAcc** = mean_t A[T,t]
-- **Forgetting** = mean_{t<T} (max_k A[k,t] − A[T,t])
-- **Plasticity (learning acc)** = mean_t A[t,t]
-- **BWT** = mean_{t<T} (A[T,t] − A[t,t])   (backward transfer, standard in the CL lit)
+- **S0** — Git bootstrap: repo pushed from laptop; server clones; `nvidia-smi` + smoke test
+  (synthetic features) passes on GPU. ✅ gate: same commit hash both sides.
+- **S1** — Implement SI, LwF, ER in the trainer (+ unit smoke on synthetic). Laptop, push.
+- **S2** — Server caches: CIFAR-10 + CIFAR-100 × {ResNet-50 all taps, CLIP all taps}.
+  ✅ gate: probe accuracy on task-0 ≥ 80% per (encoder, final tap).
+- **S3** — Hyperparameter sweeps (seed 42) per (encoder, dataset): α for MAS/EWC/SI,
+  LwF T, ER buffer. Produces frozen config table.
+- **S4** — Method benchmark tier 1: CIFAR-100-10, both encoders, 5 placements × 6 methods
+  × 5 seeds. → main table + first figures.
+- **S5** — Placement study: MAS × all 15 subsets × both encoders × CIFAR-100-10 × 5 seeds.
+  → placement figure.
+- **S6** — Tier 2: CIFAR-10 (all placements) + CIFAR-100-20 (best placement) + MNIST re-run.
+- **S7** — (stretch) TinyImageNet tier.
+- **S8** — `stats.py` significance tables, `plots.py` final figures, results frozen.
+- **S9** — **Paper writing** (LaTeX, venue template): Intro / Related work (adapter CL,
+  regularization CL, MAS/EWC/SI/LwF/ER, depth studies) / Method / Benchmark setup /
+  Results (main table, placement map, stability analysis EWC-vs-MAS variance, honest
+  negative: our framework ablation) / Discussion / Reproducibility statement (repo+seeds).
 
-Report **mean ± std over 5 seeds {42,123,456,789,1337}**. For the headline claims
-(MAS vs EWC, MAS vs SF×φ) run **Welch t-tests with Bonferroni correction** and report
-corrected p-values. One JSON log per run (config embedded). CSV aggegate per grid slice.
-α tuned once per (encoder, dataset) on seed 42 via the existing sweep, then frozen for the
-5-seed runs (report the sweep in an appendix — no per-seed tuning).
+## 6. PITFALLS CHECKLIST (unchanged core + server additions)
 
-**Decision rules (baked into the analysis script):**
-- MAS is the recommended default iff it is within noise of the best method on AvgAcc AND
-  best-or-tied on Forgetting AND lowest variance, across ≥ 2 encoders.
-- Depth finding is reportable iff the best insertion depth is consistent (or consistently
-  varies with encoder) across seeds with non-overlapping error bars.
-
----
-
-## 4. HARDWARE STRATEGY (Intel i5, 4 cores, 16 GB, no GPU) — unchanged & central
-
-- Every encoder runs **once**; all depths cached in that single pass to `cache/`.
-  ResNet-18/50 and CLIP-ViT-B/32 all fit; caching CIFAR-100 ≈ ResNet-18 CIFAR-10 time.
-- After caching, each CL run is a tiny MLP over cached vectors: **seconds to ~2 min on CPU**.
-  The whole 5-seed × multi-method grid for one (encoder, depth, dataset) is minutes.
-- torch 2.2.2 CPU wheels; `open_clip_torch` for CLIP (CPU inference is fine for caching).
-- CLIP later already handled: `get_backbone("clip_vitb32")` returns encoder + preprocess;
-  same cache format `{"features","labels"}`, adapter code unchanged (just d_in differs).
-
----
-
-## 5. REPO CHANGES
-
-```
-crcl/src/
-  cache_features.py   # + resnet50, + clip_vitb32, + multi-depth (layerN pooled) caching
-  adapter.py          # unchanged (d_in parameterized)
-  importance.py       # + "l2" (uniform); mas/ewc primary, others ablation
-  train_cl.py         # primary path = pure importance penalty (method="mas_adapter" etc.)
-  run_benchmark.py    # NEW: drives {encoder}×{depth}×{dataset}×{method}×{seed}, writes CSV
-  stats.py            # NEW: Welch t-test + Bonferroni, aggregate CSV → results table
-  plots.py            # + depth-vs-accuracy curves, per-encoder method bars, heatmaps
-  reserve.py          # kept for the framework-ablation only
-results/              # per-run JSON + aggregate CSVs + figures
-```
-
----
-
-## 6. EXECUTION ORDER (milestones, laptop-friendly)
-
-- **B0** ✅ done: Split CIFAR-10 / resnet18-final — naive/ours/mas/ewc/joint + ablations, 3 seeds.
-- **B1**: multi-depth caching for resnet18 on CIFAR-10 + CIFAR-100 (one pass each).
-- **B2**: install open_clip; cache clip_vitb32 (all depths) on CIFAR-10 + CIFAR-100.
-- **B3**: `run_benchmark.py` — full grid at 3 seeds first (fast triage), then promote the
-  live slices to 5 seeds + stats.
-- **B4**: resnet50 caching + grid (scaling check).
-- **B5**: `stats.py` significance tables + `plots.py` figures (depth curves, method bars,
-  encoder comparison, accuracy heatmaps). This + the CSVs = the paper's result package.
-
----
-
-## 7. PITFALLS CHECKLIST
-
-- Cache WITHOUT augmentation, `model.eval()`, `no_grad()`; deterministic features.
-- Previous-task heads frozen the moment their task ends (a leaking head fakes low forgetting).
-- `phi`/MAS/EWC importance measured on PREVIOUS tasks' data only.
-- α tuned ONCE per (encoder, dataset) on seed 42, then frozen — no per-seed tuning.
-- Report mean ± std over the 5 fixed seeds + corrected p-values; never a single seed.
-- Depth features have different dims — set adapter `d_in` per depth; keep d_hidden fixed
-  for comparability (note this in the writeup).
-- CLIP uses its OWN preprocessing (open_clip transform), not ImageNet transform.
-- One JSON per run; no result exists unless it is in a file.
+- Cache with `eval()`, `no_grad()`, NO augmentation; deterministic.
+- Previous heads frozen at task end; importance data = previous tasks only.
+- ER buffer sampled class-balanced from previous tasks ONLY; buffer size reported.
+- α/hyperparams never tuned per-seed. One JSON per run or it didn't happen.
+- Server runs record commit hash; never run uncommitted code.
+- CLIP uses open_clip's own preprocess; ResNet uses ImageNet transform.
+- Multi-tap concat: per-tap feature standardization (z-score from train stats) before
+  concat so no tap dominates by scale — store the stats with the cache.

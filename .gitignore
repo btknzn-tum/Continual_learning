@@ -8,3 +8,6 @@ crcl/cache/
 crcl/data/
 crcl/results/
 crcl/tests/_tmp_cache/
+logs/
+.DS_Store
+*.pdf
