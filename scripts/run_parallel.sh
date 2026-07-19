@@ -39,14 +39,18 @@ job c100r50_l3   $PY $SRC/run_benchmark.py --dataset cifar100 --backbone resnet5
 job c100r50_l4   $PY $SRC/run_benchmark.py --dataset cifar100 --backbone resnet50 --depths layer4 --tuned-file $TUNED_R50 --full
 job c100r50_c34  $PY $SRC/run_benchmark.py --dataset cifar100 --backbone resnet50 --depths "layer3+layer4" --tuned-file $TUNED_R50 --full
 
-# CIFAR-10 tier
-job c10r50_l12   $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer1 layer2 --tuned-file $TUNED_R50 --full
-job c10r50_l34   $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer3 layer4 "layer3+layer4" --tuned-file $TUNED_R50 --full
+# CIFAR-10 tier — one job per depth for max parallelism
+job c10r50_l1    $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer1 --tuned-file $TUNED_R50 --full
+job c10r50_l2    $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer2 --tuned-file $TUNED_R50 --full
+job c10r50_l3    $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer3 --tuned-file $TUNED_R50 --full
+job c10r50_l4    $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths layer4 --tuned-file $TUNED_R50 --full
+job c10r50_c34   $PY $SRC/run_benchmark.py --dataset cifar10 --backbone resnet50 --depths "layer3+layer4" --tuned-file $TUNED_R50 --full
 
-# long stream + MNIST + 5-Datasets (r50)
+# long stream + MNIST + 5-Datasets (r50, split by depth — heaviest runs)
 job t20_r50      $PY $SRC/run_benchmark.py --dataset cifar100 --backbone resnet50 --depths layer4 --n-tasks 20 --tuned-file $TUNED_R50 --full
 job mnist        $PY $SRC/run_benchmark.py --dataset mnist --backbone pixels --depths - --full
-job fd_r50       $PY $SRC/run_benchmark.py --dataset fivedata --backbone resnet50 --depths layer4 "layer3+layer4" --tuned-file $TUNED_R50 --full
+job fd_r50_l4    $PY $SRC/run_benchmark.py --dataset fivedata --backbone resnet50 --depths layer4 --tuned-file $TUNED_R50 --full
+job fd_r50_c34   $PY $SRC/run_benchmark.py --dataset fivedata --backbone resnet50 --depths "layer3+layer4" --tuned-file $TUNED_R50 --full
 
 # Placement study (MAS only) — the 11 multi-tap combos (singles come from tier-1)
 job place_r50_a  $PY $SRC/run_benchmark.py --dataset cifar100 --backbone resnet50 --methods mas \

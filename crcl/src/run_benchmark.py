@@ -36,7 +36,9 @@ METHODS = {
     "ours_framework": {"method": "ours"},
     "joint": {"method": "joint"},
 }
-DEFAULT_METHODS = ["naive", "ewc", "si", "lwf", "er", "mas", "joint"]
+# Ordered by reporting priority: our method first, then the most informative
+# contrasts (lower bound, classic rival, upper bound), then remaining baselines.
+DEFAULT_METHODS = ["mas", "naive", "ewc", "joint", "si", "lwf", "er"]
 
 
 def bwt(A):
