@@ -22,6 +22,10 @@ step() {
   fi
 }
 
+# ---- sync to latest code before anything runs --------------------------------
+git pull --ff-only 2>&1 | tail -1 || true
+echo "[QUEUE] running at commit $(git rev-parse --short HEAD)"
+
 # ---- S0: smoke ---------------------------------------------------------------
 step smoke $PY crcl/tests/smoke_test.py
 

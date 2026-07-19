@@ -51,5 +51,8 @@ DEFAULT_CONFIG = {
     "lwf_T": 2.0,
     "er_per_class": 20,
     "er_weight": 1.0,
+    # >0 during sweeps only: carve this fraction of TRAIN as validation for
+    # honest hyperparameter selection (test set never used for tuning).
+    "val_frac": 0.0,
     "seed": 42,
 }

@@ -97,10 +97,12 @@ def main():
         backbone_full = a.backbone if depth == "-" else f"{a.backbone}_{depth}"
         # existence check on the first tap of the spec
         if depth != "-":
-            first = depth.split("+")[0]
-            probe = os.path.join(CACHE_DIR, f"{a.dataset}_{a.backbone}_{first}_train.pt")
-            if not os.path.exists(probe):
-                print(f"MISSING cache {probe} — skip depth {depth}", flush=True)
+            # probe EVERY tap in the spec (a missing later tap would crash mid-grid)
+            probe_ds = "cifar10" if a.dataset == "fivedata" else a.dataset
+            missing = [t for t in depth.split("+") if not os.path.exists(
+                os.path.join(CACHE_DIR, f"{probe_ds}_{a.backbone}_{t}_train.pt"))]
+            if missing:
+                print(f"MISSING cache taps {missing} for {depth} — skip", flush=True)
                 continue
         for method in a.methods:
             metrics = []
@@ -111,8 +113,13 @@ def main():
             agg = {k: (float(np.mean([mm[k] for mm in metrics])),
                        float(np.std([mm[k] for mm in metrics])))
                    for k in metrics[0]}
+            eff = base_tuned.get(method, {})
             row = {"dataset": a.dataset, "encoder": a.backbone, "depth": depth,
-                   "method": method, "seeds": len(seeds)}
+                   "method": method, "seeds": len(seeds),
+                   "alpha": eff.get("alpha", ""),
+                   "lwf_lambda": eff.get("lwf_lambda", ""),
+                   "er_per_class": DEFAULT_CONFIG["er_per_class"],
+                   "git": __import__("train_cl").git_hash()}
             for k, (mu, sd) in agg.items():
                 row[f"{k}_mean"] = round(mu * 100, 3)
                 row[f"{k}_std"] = round(sd * 100, 3)
@@ -125,9 +132,17 @@ def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
     out = os.path.join(RESULTS_DIR, f"bench_{a.dataset}_{a.backbone}.csv")
     if rows:
+        fields = list(rows[0].keys())
         write_header = not os.path.exists(out)
+        if not write_header:
+            with open(out) as f:
+                existing = f.readline().strip().split(",")
+            if existing != fields:  # schema changed → don't misalign; version the file
+                out = os.path.join(RESULTS_DIR,
+                                   f"bench_{a.dataset}_{a.backbone}_{fields.__len__()}c.csv")
+                write_header = not os.path.exists(out)
         with open(out, "a", newline="") as f:
-            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w = csv.DictWriter(f, fieldnames=fields)
             if write_header:
                 w.writeheader()
             w.writerows(rows)

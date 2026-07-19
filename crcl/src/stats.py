@@ -13,13 +13,28 @@ import numpy as np
 from common import RESULTS_DIR
 
 COMPETITORS = ["ewc", "si", "lwf", "er", "naive"]
+REPORT_SEEDS = [42, 123, 456, 789, 1337]
+# hyperparameters that define a run's "config regime"; all seeds of a tag must agree
+HP_KEYS = ["alpha", "lwf_lambda", "lwf_T", "si_xi", "er_per_class", "er_weight",
+           "epochs", "lr", "n_tasks", "method"]
 
 
-def seed_values(tag, metric):
-    vals = []
-    for path in sorted(glob.glob(os.path.join(RESULTS_DIR, tag, "seed*.json"))):
+def seed_values(tag, metric, seeds=None):
+    """Collect metric over the explicit REPORT_SEEDS only, asserting every loaded
+    run shares the same hyperparameter regime (guards against stale/mixed JSONs)."""
+    seeds = seeds or REPORT_SEEDS
+    vals, regimes = [], set()
+    for s in seeds:
+        path = os.path.join(RESULTS_DIR, tag, f"seed{s}.json")
+        if not os.path.exists(path):
+            continue
         d = json.load(open(path))
+        cfg = d.get("config", {})
+        regimes.add(tuple(cfg.get(k) for k in HP_KEYS))
         vals.append(d["metrics"][metric])
+    if len(regimes) > 1:
+        raise SystemExit(f"[stats] {tag}: mixed hyperparameter regimes across seeds "
+                         f"{regimes} — rerun the tag cleanly before testing.")
     return np.array(vals)
 
 

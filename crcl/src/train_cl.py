@@ -82,13 +82,28 @@ def load_cached(dataset: str, backbone: str):
 FIVE_DATASETS = ["cifar10", "mnist", "svhn", "fashion", "kmnist"]
 
 
-def build_task_stream(cfg):
-    """Return (train_sets, test_sets, class_counts) as a list of per-task
-    (x, y) tensors with labels remapped to 0..C_t-1.
+def _holdout(train_sets, val_frac, seed):
+    """Carve a per-task validation split from train. Returns (new_train, val)."""
+    new_train, val = [], []
+    for i, (x, y) in enumerate(train_sets):
+        g = torch.Generator().manual_seed(seed + i)
+        perm = torch.randperm(len(x), generator=g)
+        n_val = int(round(val_frac * len(x)))
+        vi, ti = perm[:n_val], perm[n_val:]
+        new_train.append((x[ti], y[ti]))
+        val.append((x[vi], y[vi]))
+    return new_train, val
 
-    dataset == "fivedata": 5 heterogeneous datasets, one per task (features of
-    each through the same frozen encoder/backbone spec).
+
+def build_task_stream(cfg):
+    """Return (train_sets, eval_sets, class_counts) as per-task (x, y) tensors,
+    labels remapped to 0..C_t-1.
+
+    dataset == "fivedata": 5 heterogeneous datasets, one per task.
     otherwise: one dataset split into cfg["n_tasks"] class groups.
+
+    cfg["val_frac"] > 0: eval_sets are a validation holdout carved from TRAIN
+    (test never touched) — used by run_sweep for honest hyperparameter selection.
     """
     if cfg["dataset"] == "fivedata":
         train_sets, test_sets, counts = [], [], []
@@ -98,13 +113,18 @@ def build_task_stream(cfg):
             train_sets.append(task_tensors(xtr, ytr, classes))
             test_sets.append(task_tensors(xte, yte, classes))
             counts.append(len(classes))
-        return train_sets, test_sets, counts
-    xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
-    n_classes = int(ytr.max()) + 1
-    splits = make_splits(n_classes, cfg["n_tasks"])
-    train_sets = [task_tensors(xtr, ytr, g) for g in splits]
-    test_sets = [task_tensors(xte, yte, g) for g in splits]
-    return train_sets, test_sets, [len(g) for g in splits]
+        counts_out = counts
+    else:
+        xtr, ytr, xte, yte = load_cached(cfg["dataset"], cfg["backbone"])
+        n_classes = int(ytr.max()) + 1
+        splits = make_splits(n_classes, cfg["n_tasks"])
+        train_sets = [task_tensors(xtr, ytr, g) for g in splits]
+        test_sets = [task_tensors(xte, yte, g) for g in splits]
+        counts_out = [len(g) for g in splits]
+
+    if cfg.get("val_frac", 0.0) > 0.0:
+        train_sets, test_sets = _holdout(train_sets, cfg["val_frac"], cfg["seed"])
+    return train_sets, test_sets, counts_out
 
 
 @torch.no_grad()
@@ -160,7 +180,11 @@ class SIState:
             self.omega[k] += self._step_acc[k].clamp(min=0) / (total_delta ** 2 + self.xi)
 
     def normalized(self):
-        return {k: v / (v.max() + 1e-12) for k, v in self.omega.items()}
+        # Global (single-max) scaling — preserves cross-tensor ratios AND the
+        # task-count growth of the cumulative omega (per-tensor max would erase
+        # both); matches the normalization applied to reg:* signals.
+        gmax = max(float(v.max()) for v in self.omega.values()) + 1e-12
+        return {k: v / gmax for k, v in self.omega.items()}
 
 
 class ReplayBuffer:
@@ -208,7 +232,9 @@ def _lwf_loss(model, teacher, xb, prev_tasks, T):
             F.log_softmax(s_logits / T, dim=1),
             F.softmax(t_logits / T, dim=1),
             reduction="batchmean") * (T * T)
-    return loss / max(1, len(prev_tasks))
+    # Sum over previous heads (constant per-head KD weight, per Li & Hoiem);
+    # averaging would decay each old head's distillation as 1/t on long streams.
+    return loss
 
 
 def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None,

@@ -22,6 +22,14 @@ def _normalize(t: torch.Tensor) -> torch.Tensor:
     return t / (t.max() + 1e-12)
 
 
+def normalize_global(S: dict) -> dict:
+    """Scale all tensors by a SINGLE global max. Preserves cross-tensor relative
+    importance (unlike per-tensor max) and keeps the scale bounded so a shared
+    alpha grid is comparable across methods."""
+    gmax = max(float(v.max()) for v in S.values()) + 1e-12
+    return {k: v / gmax for k, v in S.items()}
+
+
 def synflow_scores(model, prev_task_ids):
     """SF for fc1/fc2 weights and biases. Operates on a clone, never the real model."""
     clone = copy.deepcopy(model)
@@ -123,4 +131,6 @@ def importance(model, prev_data, prev_task_ids, method: str = "sfxphi"):
     else:
         raise ValueError(f"unknown importance method {method}")
 
-    return {k: _normalize(v) for k, v in S.items()}
+    # Global (single-max) normalization: uniform across methods, preserves
+    # cross-tensor importance ratios, bounded scale for a shared alpha grid.
+    return normalize_global(S)

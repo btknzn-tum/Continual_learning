@@ -1,9 +1,10 @@
-"""Hyperparameter sweep on seed 42 only -> results/tuned_{dataset}_{backbone}.json.
+"""Hyperparameter sweep -> results/tuned_{dataset}_{backbone}.json.
 
-Sweeps: alpha for mas/ewc/si/l2sp; lambda for lwf. ER stays at its fixed default
-(buffer size is a protocol choice, not a tunable). Selection: lowest forgetting
-among configs within 0.5pp of the best AvgAcc for that method (stability first,
-but never sacrificing accuracy).
+Selection is done on a VALIDATION holdout carved from train (val_frac=0.1) and on
+a SWEEP SEED (7) disjoint from the reporting seeds {42,123,456,789,1337} — the test
+set is never used for tuning. Sweeps: alpha for mas/ewc/si; lambda for lwf. ER stays
+at its fixed default (buffer size is a protocol choice, not a tunable). Selection:
+lowest forgetting among configs within 0.5pp of the best AvgAcc for that method.
 """
 import argparse
 import copy
@@ -39,7 +40,7 @@ def main():
             cfg = copy.deepcopy(DEFAULT_CONFIG)
             cfg.update(overrides)
             cfg.update({"dataset": a.dataset, "backbone": a.backbone,
-                        "seed": 42, "n_tasks": n_tasks, param: v})
+                        "seed": 7, "n_tasks": n_tasks, "val_frac": 0.1, param: v})
             _, A, _ = run_sequence(cfg)
             m = compute_metrics(A)
             results.append((v, m))
