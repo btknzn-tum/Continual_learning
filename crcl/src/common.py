@@ -58,5 +58,10 @@ DEFAULT_CONFIG = {
     # rank chosen to roughly match the MLP adapter's trainable params)
     "arch": "mlp",
     "lora_rank": 144,
+    # selective plasticity (mask:<signal> and encoder-side training)
+    "mask_q": 0.10,    # fraction of LEAST-important adapter params kept trainable
+    "enc_q": 0.05,     # fraction of least-important encoder params kept trainable
+    "enc_lr": 1e-4,    # encoder learning rate (adapter uses "lr")
+    "sim_lambda": 1.0, # feature-similarity (MSE to prev encoder) regularization
     "seed": 42,
 }

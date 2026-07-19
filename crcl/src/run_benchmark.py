@@ -32,6 +32,8 @@ METHODS = {
     "lwf": {"method": "lwf"},
     "er": {"method": "er"},
     "mas": {"method": "reg:mas"},
+    "maskmas": {"method": "mask:mas"},
+    "maskewc": {"method": "mask:ewc"},
     "sfxphi": {"method": "reg:sfxphi"},
     "ours_framework": {"method": "ours"},
     "joint": {"method": "joint"},
@@ -49,7 +51,7 @@ def bwt(A):
 
 
 def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned,
-             d_hidden=None, arch="mlp"):
+             d_hidden=None, arch="mlp", mask_q=None):
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update(METHODS[method_label])
     cfg.update(tuned.get(method_label, {}))
@@ -57,6 +59,8 @@ def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned,
                 "seed": seed, "n_tasks": n_tasks, "arch": arch})
     if d_hidden:
         cfg["d_hidden"] = d_hidden
+    if mask_q is not None:
+        cfg["mask_q"] = mask_q
     # n_tasks in the tag: 10- and 20-task CIFAR-100 runs must not share a dir;
     # non-default d_hidden / lora arch get their own suffix (capacity controls)
     tag = f"{dataset}_{backbone_full}_t{n_tasks}_{method_label}"
@@ -64,6 +68,8 @@ def run_cell(dataset, backbone_full, method_label, seed, n_tasks, tuned,
         tag += f"_h{d_hidden}"
     if arch == "lora":
         tag += f"_lora{cfg['lora_rank']}"
+    if method_label.startswith("mask") and mask_q is not None:
+        tag += f"_q{int(round(mask_q * 100))}"
     t0 = time.time()
     if cfg["method"] == "joint":
         per_task = run_joint(cfg)
@@ -92,6 +98,8 @@ def main():
     p.add_argument("--d-hidden", type=int, default=None,
                    help="override adapter width (capacity-control runs)")
     p.add_argument("--arch", default="mlp", choices=["mlp", "lora"])
+    p.add_argument("--mask-q", type=float, default=None,
+                   help="trainable fraction for mask:* methods (e.g. 0.05)")
     p.add_argument("--seeds", nargs="*", type=int, default=None,
                    help="explicit seed list (overrides --full/fast)")
     p.add_argument("--tuned-file", default=None)
@@ -124,7 +132,8 @@ def main():
             metrics = []
             for seed in seeds:
                 m = run_cell(a.dataset, backbone_full, method, seed, n_tasks,
-                             base_tuned, d_hidden=a.d_hidden, arch=a.arch)
+                             base_tuned, d_hidden=a.d_hidden, arch=a.arch,
+                             mask_q=a.mask_q)
                 metrics.append(m)
             agg = {k: (float(np.mean([mm[k] for mm in metrics])),
                        float(np.std([mm[k] for mm in metrics])))

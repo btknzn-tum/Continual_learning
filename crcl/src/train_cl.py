@@ -5,6 +5,10 @@ Methods (cfg["method"]):
   reg:<signal>   — pure importance-weighted quadratic penalty; signal in
                    {mas, ewc, l2, sfxphi, sf, phi, wanda, taylor}
                    ("mas_adapter" is an alias for reg:mas)
+  mask:<signal>  — selective plasticity: rank adapter params by accumulated
+                   importance, HARD-freeze the top (1-mask_q) fraction and
+                   train only the least-important mask_q fraction (no soft
+                   penalty). Task 0 trains everything.
   si             — Synaptic Intelligence (online path-integral importance)
   lwf            — Learning without Forgetting (distill previous heads on current data)
   er             — Experience Replay (small class-balanced feature buffer)
@@ -244,7 +248,8 @@ def _lwf_loss(model, teacher, xb, prev_tasks, T):
 
 
 def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None,
-               si_state=None, teacher=None, prev_tasks=None, buffer=None):
+               si_state=None, teacher=None, prev_tasks=None, buffer=None,
+               grad_masks=None):
     dl = DataLoader(TensorDataset(x, y), batch_size=cfg["batch_size"], shuffle=True)
     params = [p for p in model.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=cfg["lr"], weight_decay=0.0)
@@ -274,6 +279,12 @@ def train_task(model, x, y, task_id, cfg, res_masks=None, S=None, theta_old=None
                     model, buffer, min(cfg["batch_size"], len(buffer)))
             opt.zero_grad()
             loss.backward()
+            if grad_masks is not None:
+                # selective plasticity: hard-freeze protected params by zeroing
+                # their gradients (only the least-important fraction may move)
+                for k, v in _params(model).items():
+                    if v.grad is not None:
+                        v.grad *= grad_masks[k]
             if si_state is not None:
                 si_state.pre_step(model)
                 opt.step()
@@ -307,6 +318,8 @@ def run_sequence(cfg):
     else:
         pure_signal = None
     use_pure = pure_signal is not None
+    use_mask = method.startswith("mask:")
+    mask_signal = method.split(":", 1)[1] if use_mask else None
     use_si = method == "si"
     use_lwf = method == "lwf"
     use_er = method == "er"
@@ -345,6 +358,17 @@ def run_sequence(cfg):
                           for n in PARAM_NAMES)
                 den = torch.sqrt(sum((theta_old[n] ** 2).sum() for n in PARAM_NAMES))
                 stats["delta_rel"].append(float(torch.sqrt(dsq) / den))
+        elif use_mask:
+            prev_data = [(k,) + subsample(*train_sets[k], cfg["phi_samples"], seed=cfg["seed"] + k)
+                         for k in range(t)]
+            S = importance(model, prev_data, list(range(t)), method=mask_signal)
+            # bottom mask_q fraction (least important) stays trainable; ties at
+            # the threshold (e.g. exact zeros) may admit slightly more than q
+            flat = torch.cat([v.flatten() for v in S.values()])
+            kth = max(1, int(cfg["mask_q"] * flat.numel()))
+            thresh = flat.kthvalue(kth).values
+            grad_masks = {k: (v <= thresh).float() for k, v in S.items()}
+            train_task(model, x, y, t, cfg_clean, grad_masks=grad_masks)
         elif use_si:
             theta_old = _snapshot(model)
             train_task(model, x, y, t, cfg_clean,
