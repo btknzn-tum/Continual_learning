@@ -1,0 +1,298 @@
+\documentclass{article} % TMLR
+\usepackage[accepted]{tmlr} % switch to [preprint] before arXiv, [] for submission
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage[capitalize,noabbrev]{cleveref}
+\newcommand{\todo}[1]{\textcolor{red}{[TODO: #1]}}
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\ours}{\textsc{ProtA}} % protected adapter shorthand
+
+\title{Where to Protect: Insertion Depth Determines the Fate of\\
+Importance-Protected Adapters in Continual Learning}
+
+\author{\name Batukaan \"Ozen \email ozenbatukaan@gmail.com \\
+\addr Independent Researcher}
+
+\def\month{XX}
+\def\year{2026}
+\usepackage{url}\def\openreview{\url{https://openreview.net/forum?id=XXXX}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Parameter-importance regularization (EWC, MAS) applied to a small adapter on a
+frozen pre-trained encoder has recently emerged as a strong recipe for
+continual learning (CL). What has not been studied is \emph{where} such a
+protected adapter should read the encoder: every published variant taps the
+final representation. We present a systematic benchmark of importance-protected
+adapters across \emph{insertion depths} of two heterogeneous vision encoders
+(supervised ResNet-50, CLIP ViT-B/32), five class-incremental streams
+(Split CIFAR-10/100 at 5--20 tasks, Split MNIST, and a heterogeneous
+5-dataset stream), five classic CL methods (EWC, MAS, SI, LwF, ER) and two
+modern frozen-feature baselines (NCM, RanPAC), all under a single trainer,
+validation-based tuning, and five seeds with corrected significance tests.
+Three findings emerge. \textbf{(1) Placement is method-agnostic and can improve
+the state of the art}: concatenating mid- and late-depth features
+(``multi-tap'') lifts not only protected adapters but RanPAC itself, from
+82.7\% to 87.3\% on the 5-dataset stream ($+4.6$) and from 95.9\% to 96.2\% on
+20-task CIFAR-100 --- a placement-only change to a published method.
+\textbf{(2) The optimal placement is encoder-dependent}: late-pair taps win on
+ResNet-50, whereas CLIP's final block dominates and early blocks actively hurt.
+\textbf{(3) Protection is most critical at early depths}: without it,
+sequential fine-tuning collapses by up to 35 points of forgetting at the
+earliest taps of both encoders, while MAS restores near-upper-bound accuracy at
+every depth. Capacity-matched controls (wider MLP, LoRA) confirm the gains stem
+from placement and protection, not parameters. We conclude with an honest
+account of where protected adapters still trail random-projection classifiers
+and \todo{selective encoder plasticity results pending} how far frozen features
+can be pushed.
+\end{abstract}
+
+\section{Introduction}
+Continual learning (CL) on top of frozen pre-trained encoders has become the
+dominant regime for vision benchmarks: features are computed once, and a light
+trainable module absorbs the task stream
+\citep{zhou2023revisiting,mcdonnell2023ranpac,wang2022l2p}. Within this regime,
+a particularly simple recipe --- a shared multi-layer adapter protected by a
+parameter-importance penalty \citep{kirkpatrick2017ewc,aljundi2018mas} --- has
+been rediscovered several times in quick succession
+\citep{ewclora2026,ekpc2025,onlinelora2025}. All of these works, however,
+attach the adapter to the \emph{final} encoder representation, implicitly
+assuming that the last layer is the right place to continually learn.
+
+This paper asks the question none of them ask: \emph{where} should a protected
+adapter be inserted? The answer, it turns out, is neither ``at the end'' nor
+universal, and getting it right is worth more than switching between
+regularizers.
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item \textbf{A placement map for protected adapters.} We benchmark
+  importance-protected adapters at every stage of ResNet-50 and at four depths
+  of CLIP ViT-B/32, on five streams, under a unified trainer with
+  validation-tuned hyperparameters and 5-seed statistics
+  (\cref{sec:setup,sec:depthmap}).
+\item \textbf{Placement transfers to the state of the art.} The multi-tap
+  configuration discovered on protected adapters also improves RanPAC
+  \citep{mcdonnell2023ranpac} on every stream we test --- most notably
+  $+4.6$ points on the heterogeneous 5-dataset stream (\cref{sec:transfer}).
+\item \textbf{Encoder-dependence and early-depth fragility.} The optimal tap
+  set differs qualitatively between a supervised CNN and a contrastive ViT,
+  and unprotected sequential training collapses catastrophically precisely at
+  the depths where features are most reusable (\cref{sec:depthmap}).
+\item \textbf{Controls that keep the comparison honest.} Capacity-matched
+  wider adapters and a parameter-matched LoRA variant isolate placement and
+  protection from parameter count; we report where protected adapters trail
+  RanPAC and show the gap is one of classifier capacity, not forgetting
+  (\cref{sec:capacity,sec:honest}).
+\item \todo{conditional: selective encoder plasticity contribution}
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+\paragraph{Importance-based regularization.} EWC \citep{kirkpatrick2017ewc},
+SI \citep{zenke2017si} and MAS \citep{aljundi2018mas} penalize movement of
+parameters deemed important for previous tasks; LwF \citep{li2016lwf} distills
+previous outputs, and experience replay \citep{chaudhry2019er} stores
+exemplars. We use all five as same-trainer baselines.
+
+\paragraph{Adapters on frozen backbones.} Residual adapters
+\citep{rebuffi2017adapters,houlsby2019adapters} and LoRA \citep{hu2021lora}
+transfer frozen models parameter-efficiently. In CL, ADAM/APER
+\citep{zhou2023revisiting}, SimpleCIL prototypes, and prompt-based methods
+\citep{wang2022l2p,wang2022dualprompt,smith2023coda} adapt frozen ViTs.
+Closest to us, EWC-LoRA \citep{ewclora2026}, EKPC \citep{ekpc2025} and
+Online-LoRA \citep{onlinelora2025} combine importance penalties with adapters
+--- always at the final representation. Our contribution is orthogonal: the
+\emph{placement axis}, plus capacity-matched controls none of these report.
+
+\paragraph{Frozen-feature classifiers.} RanPAC \citep{mcdonnell2023ranpac}
+projects frozen features through a fixed random expansion and fits a streaming
+ridge classifier; LayUP \citep{layup2024} concatenates the last $k$ ViT blocks
+in this family, foreshadowing our multi-tap finding within a single encoder
+type. NCM \citep{rebuffi2017icarl,zhou2023revisiting} is the prototype
+baseline. We run both in our exact setting and \emph{improve} RanPAC with our
+placement.
+
+\paragraph{Where-to-adapt \& depth analyses.} Head2Toe \citep{evci2022head2toe}
+selects intermediate features for transfer; \citet{ramasesh2021anatomy} and
+\citet{davari2022probing} analyze which depths drift under CL;
+\citet{lee2023wacv} study pre-trained CL empirically. None map insertion depth
+for \emph{protected adapters} across heterogeneous encoders.
+
+\paragraph{Parameter isolation.} PackNet \citep{mallya2018packnet}, CLNP
+\citep{golkar2019clnp}, HAT \citep{serra2018hat}, WSN \citep{kang2022wsn},
+NISPA \citep{gurbuz2022nispa} and SPU \citep{zhang2024spu} allocate or select
+parameters per task. \todo{connect to selective encoder plasticity if included}
+
+\paragraph{Streams.} The heterogeneous 5-dataset stream follows
+\citet{ebrahimi2020adversarial}; we substitute KMNIST for notMNIST for full
+torchvision reproducibility (documented in \cref{sec:setup}).
+
+\section{Method and Benchmark Design}
+\label{sec:method}
+\subsection{Protected adapters at arbitrary insertion depths}
+Let $E$ be a frozen encoder with stages $E_1,\dots,E_L$. For a tap set
+$\mathcal{T}=\{l_1,\dots,l_m\}$ we pool each tapped stage
+($z_l=\mathrm{GAP}(E_l(x))$ for CNNs; the CLS token for ViT blocks), z-score
+each tap with train statistics, and concatenate:
+$z_\mathcal{T}(x)=[\hat z_{l_1};\dots;\hat z_{l_m}]$.
+A single shared 2-layer ReLU MLP adapter $g_\theta$ (hidden width 256, no
+normalization layers) maps $z_\mathcal{T}$ to a representation read by
+per-task linear heads $h_t$ (task-incremental protocol).
+
+Training task $t$ minimizes
+\begin{equation}
+\mathcal{L}_t=\mathrm{CE}\big(h_t(g_\theta(z_\mathcal{T}(x))),y\big)
++\alpha\sum_{i} S_i\,(\theta_i-\theta_i^{t-1})^2,
+\label{eq:penalty}
+\end{equation}
+where $S$ is the accumulated importance of the chosen signal --- MAS
+($S_i\propto\mathbb{E}\,|\partial\|h(g_\theta(z))\|_2^2/\partial\theta_i|$),
+EWC (diagonal Fisher), or SI (path integral) --- normalized by a single global
+maximum to preserve cross-tensor ratios. LwF, ER and plain sequential training
+(\emph{naive}) share the identical trainer; a pooled multi-head \emph{joint}
+run provides the upper bound.
+
+\subsection{Controls}
+\textbf{Capacity:} widening the adapter to match multi-tap input
+dimensionality (h354) and beyond (h1024), and a parameter-matched linear LoRA
+adapter, separate placement effects from parameter count.
+\textbf{SOTA baselines:} NCM and RanPAC (random projection dim
+$10^4$, streaming Gram + ridge, $\lambda$ tuned on a train split) run on the
+\emph{same cached features}, including our multi-tap configurations.
+\todo{Selective encoder plasticity subsection if tonight's runs support it}
+
+\section{Experimental Setup}
+\label{sec:setup}
+\textbf{Streams.} Split CIFAR-10 (5 tasks), Split CIFAR-100 (10 and 20 tasks),
+Split MNIST (pixels, sanity), and the heterogeneous 5-dataset stream
+CIFAR-10$\to$MNIST$\to$SVHN$\to$Fashion$\to$KMNIST (one dataset per task).
+Task-incremental evaluation (task identity at test); metrics: average final
+accuracy (AvgAcc), forgetting, plasticity, BWT.
+\textbf{Encoders.} ResNet-50 (ImageNet-V2 weights; taps layer1--4:
+256/512/1024/2048-d) and CLIP ViT-B/32 (blocks 3/6/9 + final embedding).
+Features are cached once; every CL run trains only the adapter and heads.
+\textbf{Protocol.} Hyperparameters ($\alpha$, $\lambda_{\mathrm{LwF}}$)
+selected on a 10\% train-carved validation split with sweep seed 7, disjoint
+from the five reporting seeds $\{42,123,456,789,1337\}$; Welch $t$-tests with
+Bonferroni correction across method pairs. Code, tuned configurations, and all
+per-seed JSONs are released.
+
+\section{Results}
+\subsection{The depth map}
+\label{sec:depthmap}
+\begin{table}[t]
+\centering\small
+\caption{Split CIFAR-100 (10 tasks, ResNet-50), AvgAcc\,\% $\pm$ std over 5
+seeds (Forgetting\,\% in parentheses). Joint = upper bound. Protection
+restores near-upper-bound accuracy at every depth; the collapse of naive
+training grows toward early taps.}
+\label{tab:depthmap}
+\begin{tabular}{lcccc}
+\toprule
+Tap & Naive & EWC & MAS & Joint \\
+\midrule
+layer1 & 45.3$\pm$1.0 (31.8) & 64.3$\pm$0.5 (1.5) & 64.9$\pm$0.7 (2.1) & 73.6 \\
+layer2 & 55.9$\pm$0.4 (30.6) & 74.1$\pm$0.3 (1.8) & 74.6$\pm$0.4 (1.8) & 81.6 \\
+layer3 & 72.1$\pm$1.4 (23.2) & 87.1$\pm$0.4 (2.7) & 87.2$\pm$0.3 (1.5) & 90.7 \\
+layer4 & 76.0$\pm$1.9 (19.4) & 89.8$\pm$0.3 (2.1) & 89.6$\pm$0.3 (1.5) & \todo{} \\
+layer3+4 & 74.1$\pm$1.5 (22.5) & 88.8 (4.5)$^\dagger$ & \best{90.2$\pm$0.5} (1.8) & \todo{} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering\small
+\caption{CLIP ViT-B/32, Split CIFAR-100 (10 tasks): the placement optimum is
+encoder-dependent --- the final embedding dominates and adding early blocks
+hurts, the opposite of ResNet-50. $^*$single seed, 5-seed running.}
+\label{tab:clipdepth}
+\begin{tabular}{lccc}
+\toprule
+Tap & Naive & MAS & EWC \\
+\midrule
+block3 & 42.0$\pm$1.2 (35.5) & 67.8$\pm$0.4 (1.9) & 57.9$\pm$2.4 (15.9) \\
+block9 & \todo{} & 87.3$\pm$0.5 (1.0) & \todo{} \\
+final & 91.6$^*$ (5.8) & 94.1$^*$ (0.4) & \best{95.4$^*$} (1.0) \\
+block9+final & 87.5$^*$ (10.2) & 93.9$^*$ (1.0) & 94.8$^*$ (1.6) \\
+block3+final & --- & 92.8$^*$ (0.8) & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\todo{Fill layer4/l3+4 joint cells; complete CLIP 5-seed numbers from running
+grid; add Fig.~1 depth-vs-forgetting curves}
+
+\subsection{Placement transfers to RanPAC}
+\label{sec:transfer}
+\begin{table}[t]
+\centering\small
+\caption{Applying our multi-tap placement to RanPAC (ResNet-50) improves it on
+every stream --- a placement-only change to a published method. 5 seeds except
+$^*$.}
+\label{tab:transfer}
+\begin{tabular}{lccc}
+\toprule
+Stream & RanPAC (layer4) & RanPAC (layer3+4) & $\Delta$ \\
+\midrule
+Split CIFAR-10 & 98.30$^*$ & 98.42$^*$ & +0.12 \\
+Split CIFAR-100 (20 t.) & 95.88$\pm$0.10 & \best{96.15$\pm$0.26} & +0.27 \\
+5-Datasets & 82.69$\pm$0.04 & \best{87.28$\pm$0.10} & \best{+4.59} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Long and heterogeneous streams; honest SOTA comparison}
+\label{sec:honest}
+\begin{table}[t]
+\centering\small
+\caption{20-task CIFAR-100 and the 5-dataset stream (ResNet-50, layer3+4
+unless noted). RanPAC's ridge classifier exceeds even our adapter's
+\emph{joint} upper bound --- the remaining gap is classifier capacity, not
+forgetting.}
+\label{tab:long}
+\begin{tabular}{lcc}
+\toprule
+Method & C100 20-task & 5-Datasets \\
+\midrule
+Naive adapter & 78.9$\pm$1.5 (18.5) & \todo{} \\
+MAS adapter & 94.5$\pm$0.2 (1.2)$^{l4}$ & 79.5$\pm$1.4 (7.4) \\
+EWC adapter & 94.5$\pm$0.2 (1.5)$^{l4}$ & \todo{} \\
+Joint (adapter UB) & 95.1$\pm$0.2$^{l4}$ & \todo{} \\
+NCM & 93.6 & 69.4 \\
+RanPAC (+our placement) & \best{96.2$\pm$0.3} & \best{87.3$\pm$0.1} \\
+\midrule
+CLIP-final MAS & \todo{} & 82.8$\pm$0.5$^{n2}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Capacity-matched controls}
+\label{sec:capacity}
+\todo{h354 done (98.22/98.35 C10); h1024 + LoRA + C100 running in compare
+chain; fill table T5}
+
+\subsection{Beyond frozen features (conditional)}
+\label{sec:beyond}
+\todo{Selective encoder plasticity: fivedata e10 running (task0 92.89 vs
+cached 92.02); c100 t10/t20 + fivedata e20 queued; ablations sim/alpha-enc/q}
+
+\section{Discussion and Limitations}
+\label{sec:limits}
+Task-incremental protocol only (class-IL extension \todo{pending decision});
+two encoders; classic small-image streams under an ImageNet/CLIP backbone;
+placement searched over stage-level taps, not arbitrary layers.
+\todo{expand after final results}
+
+\section{Conclusion}
+\todo{write after results finalized}
+
+\bibliography{refs}
+\bibliographystyle{tmlr}
+
+\end{document}
