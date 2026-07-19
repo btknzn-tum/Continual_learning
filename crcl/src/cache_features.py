@@ -60,28 +60,39 @@ def get_encoder(name: str):
             "ViT-B-32", pretrained="laion2b_s34b_b79k")
 
         def clip_depths(model, x):
+            # Version-robust extraction: forward via encode_image (always correct)
+            # and capture intermediate blocks with hooks. Never re-implement the
+            # ViT forward — open_clip switched LND->batch-first between versions,
+            # and a wrong layout silently yields garbage (chance-level) features.
             v = model.visual
-            # replicate open_clip ViT forward, tapping intermediate blocks
-            z = v.conv1(x)                                   # [B, width, gh, gw]
-            z = z.reshape(z.shape[0], z.shape[1], -1).permute(0, 2, 1)
-            cls = v.class_embedding.to(z.dtype) + torch.zeros(
-                z.shape[0], 1, z.shape[-1], dtype=z.dtype, device=z.device)
-            z = torch.cat([cls, z], dim=1)
-            z = z + v.positional_embedding.to(z.dtype)
-            z = v.ln_pre(z)
-            z = z.permute(1, 0, 2)  # LND
             taps = {3: "block3", 6: "block6", 9: "block9"}
-            out = {}
-            blocks = v.transformer.resblocks
-            for i, blk in enumerate(blocks):
-                z = blk(z)
+            captured, hooks = {}, []
+
+            def mk_hook(name):
+                def h(_mod, _inp, out):
+                    captured[name] = out[0] if isinstance(out, tuple) else out
+                return h
+
+            for i, blk in enumerate(v.transformer.resblocks):
                 if (i + 1) in taps:
-                    out[taps[i + 1]] = z[0].float()  # CLS token, [B, width]
-            z = z.permute(1, 0, 2)
-            pooled = v.ln_post(z[:, 0, :])
-            if v.proj is not None:
-                pooled = pooled @ v.proj
-            out["final"] = pooled.float()
+                    hooks.append(blk.register_forward_hook(mk_hook(taps[i + 1])))
+            try:
+                final = model.encode_image(x)
+            finally:
+                for h in hooks:
+                    h.remove()
+            B = x.shape[0]
+            out = {"final": final.float()}
+            for name, t in captured.items():
+                # CLS = sequence index 0; detect whether batch dim is 0 (NLD)
+                # or 1 (LND) by matching B (batch != seq_len for our batches).
+                if t.shape[0] == B and t.shape[1] != B:
+                    cls = t[:, 0, :]
+                elif t.shape[1] == B:
+                    cls = t[0]
+                else:
+                    cls = t[:, 0, :]
+                out[name] = cls.float()
             return out
 
         return m, preprocess, clip_depths
