@@ -105,8 +105,9 @@ class GPUTransform:
         x = xb_u8.float().div_(255.0)
         x = F.interpolate(x, size=224, mode="bicubic",
                           align_corners=False).clamp_(0.0, 1.0)
-        x = (x - self.mean) / self.std
-        return x.contiguous(memory_format=torch.channels_last)
+        # NOTE: keep contiguous format — on Blackwell/cu128 channels_last is
+        # faster for inference but 1.6x SLOWER for backward (measured)
+        return (x - self.mean) / self.std
 
 
 def iter_batches(x, y, batch, device, shuffle=False, generator=None):
@@ -305,7 +306,6 @@ def run_stream(cfg, device):
     print(f"  [data] stream ready ({T} tasks)", flush=True)
     encoder = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
     encoder.eval().to(device)  # eval() for the WHOLE stream: BN stats frozen
-    encoder.to(memory_format=torch.channels_last)
     for p in encoder.parameters():
         p.requires_grad_(False)
     print("  [enc] resnet50 on gpu", flush=True)
