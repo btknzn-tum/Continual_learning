@@ -448,7 +448,9 @@ classifier-capacity gap over the gradient MLP adapter (82.4) yet again, but
 still \emph{below} the same head on the \emph{frozen} encoder (87.3 / 87.1).
 The two independent classifiers thus agree: the small encoder adaptation we
 apply does not improve the features in a way either head can exploit; the
-frozen ceiling stands under both. We read this consistency as evidence that
+frozen ceiling stands under both. Pushing plasticity harder is actively
+destructive --- the aggressive $q{=}0.2$ variant corrupts the representation so
+badly that even the ridge head collapses (70.2, from 86.9 at $q{=}0.05$). We read this consistency as evidence that
 crossing it will require adaptation at a larger scale (more parameters or more
 exposure) than a forgetting-safe budget allows here --- an honest boundary for
 future work rather than a solved problem.
