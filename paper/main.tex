@@ -47,8 +47,9 @@ sequential fine-tuning collapses by up to 35 points of forgetting at the
 earliest taps of both encoders, while MAS restores near-upper-bound accuracy at
 every depth. Capacity-matched controls (wider MLP, LoRA) confirm the gains stem
 from placement and protection, not parameters, and a class-incremental
-evaluation shows the placement effect \emph{amplifies} under the harder
-protocol ($+7.7$ for RanPAC vs.\ $+1.0$ task-incremental). Finally, unfreezing
+evaluation shows the placement effect persists and somewhat strengthens under
+the harder protocol ($+2.6$ for RanPAC vs.\ $+1.0$ task-incremental). Finally,
+unfreezing
 only the least-important 5\% of encoder parameters helps precisely on the most
 shifted stream and hurts on near-distribution ones, giving a single actionable
 rule: spend both tap depth and encoder plasticity where the distribution shift
@@ -429,9 +430,12 @@ gains $+3.1$. Fraction: quadrupling the trainable share to $q{=}0.2$ (with a
 weakened anchor) nudges accuracy up to 81.9 but at $2.6\times$ the forgetting
 (11.7 vs.\ 4.5), a strictly worse operating point than $q{=}0.05$. Brief,
 sparse, well-anchored plasticity adapts; more of any of the three erodes.
-\todo{no-anchor ($\lambda{=}0$) and frozen-encoder ($q{=}0$) controls running
-to isolate the anchor's contribution; RanPAC-head combination queued; 5-seed
-promotion pending}
+The feature-similarity anchor is what buys the stability: removing it
+($\lambda{=}0$) leaves accuracy essentially unchanged (81.9 vs.\ 81.2) but
+raises forgetting from 4.5 to 7.3 --- the anchor is a pure
+stability regularizer, trading no accuracy for a $1.6\times$ reduction in
+forgetting. \todo{frozen-encoder ($q{=}0$) control and RanPAC-head combination
+running; 5-seed promotion pending}
 
 \subsection{Task-agnostic (class-IL) evaluation}
 \label{sec:classil}
@@ -442,31 +446,30 @@ still all but eliminates \emph{forgetting} (6.5\% vs.\ naive's 63.5\% on
 C100), but the merged head now suffers heavy cross-task confusion (37.1\%
 accuracy), the well-documented failure of regularization-based methods under
 class-IL \citep{vandeven2022three}. Second, and more important for this paper,
-\textbf{the placement finding not only survives the harder protocol but
-amplifies}: giving RanPAC our multi-tap features raises its class-IL accuracy
-by $+7.7$ points on C100 (69.1\,$\to$\,76.7), versus $+1.0$ under task-IL ---
-the wider the evaluation demands on the representation, the more where-you-tap
-matters. RanPAC dominates class-IL outright (76.7 vs.\ the adapter's 37.1),
+\textbf{the placement finding survives the harder protocol and somewhat
+strengthens}: giving RanPAC our multi-tap features raises its class-IL accuracy
+by $+2.6$ points on C100 (74.1\,$\to$\,76.7, 5 seeds), versus $+1.0$ under
+task-IL --- where-you-tap matters at least as much when the evaluation is
+harder. RanPAC dominates class-IL outright (76.7 vs.\ the adapter's 37.1),
 consistent with \cref{sec:honest}: its advantage is classifier capacity, and
 class-IL is where capacity is decisive.
 
 \begin{table}[t]
 \centering\small
-\caption{Class-incremental (task-agnostic, global-argmax) evaluation,
-ResNet-50 layer3+4. Regularized adapters suppress forgetting but not cross-task
-confusion; RanPAC dominates, and our multi-tap placement helps it \emph{more}
-under class-IL than task-IL ($+7.7$ vs.\ $+1.0$ on C100). $^*$single seed,
-5-seed running.}
+\caption{Class-incremental (task-agnostic, global-argmax) evaluation.
+Regularized adapters suppress forgetting but not cross-task confusion; RanPAC
+dominates, and our multi-tap placement helps it at least as much as under
+task-IL ($+2.6$ vs.\ $+1.0$ on C100, 5 seeds). $^*$single seed.}
 \label{tab:classil}
 \begin{tabular}{llcccc}
 \toprule
 Stream & & Naive & MAS & NCM & RanPAC \\
 \midrule
 \multirow{2}{*}{C100 (10 t.)}
- & last tap & 31.9$\pm$0.8 (58.3) & 34.3$\pm$1.3 (4.8) & 63.4 & 69.1$^*$ \\
+ & last tap & 31.9$\pm$0.8 (58.3) & 34.3$\pm$1.3 (4.8) & 63.4 & 74.1$\pm$0.2 \\
  & multi-tap & 29.6$\pm$2.2 (63.5) & 37.1$\pm$1.8 (6.5) & 61.9 & \best{76.7$\pm$0.1} \\
 \midrule
-CIFAR-10 & multi-tap & 62.6$\pm$3.4 (31.2) & 61.7$\pm$2.0 (1.5) & --- & \best{92.4$^*$} \\
+CIFAR-10 & multi-tap & 62.6$\pm$3.4 (31.2) & 61.7$\pm$2.0 (1.5) & --- & \best{92.4$\pm$0.1} \\
 5-Datasets & multi-tap & 26.6$\pm$3.1 (63.4) & 41.5$\pm$3.0 (10.3) & --- & \best{87.1$\pm$0.1} \\
 \bottomrule
 \end{tabular}
