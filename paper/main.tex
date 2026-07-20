@@ -30,7 +30,7 @@ continual learning (CL). What has not been studied is \emph{where} such a
 protected adapter should read the encoder: every published variant taps the
 final representation. We present a systematic benchmark of importance-protected
 adapters across \emph{insertion depths} of two heterogeneous vision encoders
-(supervised ResNet-50, CLIP ViT-B/32), five class-incremental streams
+(supervised ResNet-50, CLIP ViT-B/32), five continual-learning streams
 (Split CIFAR-10/100 at 5--20 tasks, Split MNIST, and a heterogeneous
 5-dataset stream), five classic CL methods (EWC, MAS, SI, LwF, ER) and two
 modern frozen-feature baselines (NCM, RanPAC), all under a single trainer,
@@ -63,7 +63,7 @@ trainable module absorbs the task stream
 a particularly simple recipe --- a shared multi-layer adapter protected by a
 parameter-importance penalty \citep{kirkpatrick2017ewc,aljundi2018mas} --- has
 been rediscovered several times in quick succession
-\citep{ewclora2026,ekpc2025,onlinelora2025}. All of these works, however,
+\citep{ewclora2026,onlinelora2025}. All of these works, however,
 attach the adapter to the \emph{final} encoder representation, implicitly
 assuming that the last layer is the right place to continually learn.
 
@@ -113,18 +113,25 @@ exemplars. We use all five as same-trainer baselines.
 transfer frozen models parameter-efficiently. In CL, ADAM/APER
 \citep{zhou2023revisiting}, SimpleCIL prototypes, and prompt-based methods
 \citep{wang2022l2p,wang2022dualprompt,smith2023coda} adapt frozen ViTs.
-Closest to us, EWC-LoRA \citep{ewclora2026}, EKPC \citep{ekpc2025} and
-Online-LoRA \citep{onlinelora2025} combine importance penalties with adapters
---- always at the final representation. Our contribution is orthogonal: the
-\emph{placement axis}, plus capacity-matched controls none of these report.
+Closest to us, \citet{ewclora2026} regularize a shared LoRA update with EWC and
+\citet{onlinelora2025} apply importance-weighted low-rank adaptation online ---
+both attach the protected module to the final representation. Our contribution
+is orthogonal: the \emph{placement axis}, plus capacity-matched controls
+neither reports.
 
 \paragraph{Frozen-feature classifiers.} RanPAC \citep{mcdonnell2023ranpac}
 projects frozen features through a fixed random expansion and fits a streaming
-ridge classifier; LayUP \citep{layup2024} concatenates the last $k$ ViT blocks
-in this family, foreshadowing our multi-tap finding within a single encoder
-type. NCM \citep{rebuffi2017icarl,zhou2023revisiting} is the prototype
-baseline. We run both in our exact setting and \emph{improve} RanPAC with our
-placement.
+ridge classifier; NCM \citep{rebuffi2017icarl,zhou2023revisiting} is the
+prototype baseline. Most directly related, LayUP \citep{layup2024} concatenates
+the last $k$ ViT blocks for \emph{prototype/Gram} classifiers and already
+observes that intermediate representations are more robust to domain shift.
+Our study differs on three axes: (i) we study \emph{gradient-trained protected
+adapters}, not only closed-form prototype heads; (ii) we compare a supervised
+CNN against a contrastive ViT and find the placement optimum \emph{flips}
+between them; and (iii) we show the tap choice transfers to and improves RanPAC
+itself, with capacity-matched controls. We thus generalize the ``read between
+the layers'' insight from one classifier family to a placement principle that
+holds across method families and encoders.
 
 \paragraph{Where-to-adapt \& depth analyses.} Head2Toe \citep{evci2022head2toe}
 selects intermediate features for transfer; \citet{ramasesh2021anatomy} and
@@ -416,13 +423,14 @@ streams the same mechanism \emph{costs} accuracy (C100 10-task: 89.1 vs.\
 stream, any encoder motion is pure risk. Encoder plasticity, like tap depth,
 should be spent \emph{where the shift is} --- and nowhere else.
 
-Exposure matters as much as placement: at 20 epochs per task the same
-mechanism over-drifts (77.0, below the frozen 78.1), i.e., plasticity has a
-\emph{budget} --- brief exposure adapts, prolonged exposure erodes. We
-therefore treat epochs-per-task as a first-class hyperparameter of encoder
-plasticity, and isolate its contribution with a frozen-encoder control at
-matched exposure. \todo{frozen-e10 control, aggressive-adaptation (q=0.2)
-and no-anchor ablations running; RanPAC-head combination queued; 5-seed
+Plasticity has a \emph{budget} along two axes. Exposure: at 20 epochs per task
+the same mechanism over-drifts (77.0, below the frozen 78.1), where 10 epochs
+gains $+3.1$. Fraction: quadrupling the trainable share to $q{=}0.2$ (with a
+weakened anchor) nudges accuracy up to 81.9 but at $2.6\times$ the forgetting
+(11.7 vs.\ 4.5), a strictly worse operating point than $q{=}0.05$. Brief,
+sparse, well-anchored plasticity adapts; more of any of the three erodes.
+\todo{no-anchor ($\lambda{=}0$) and frozen-encoder ($q{=}0$) controls running
+to isolate the anchor's contribution; RanPAC-head combination queued; 5-seed
 promotion pending}
 
 \subsection{Task-agnostic (class-IL) evaluation}
