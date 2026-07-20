@@ -390,8 +390,29 @@ streams the same mechanism \emph{costs} accuracy (C100 10-task: 89.1 vs.\
 90.2 frozen; 20-task: 93.4 vs.\ 94.5): when pre-training already covers the
 stream, any encoder motion is pure risk. Encoder plasticity, like tap depth,
 should be spent \emph{where the shift is} --- and nowhere else.
-\todo{aggressive-adaptation ablation (q=0.2, weak anchor) + no-anchor /
-frozen-encoder ablations queued; 5-seed promotion pending}
+
+Exposure matters as much as placement: at 20 epochs per task the same
+mechanism over-drifts (77.0, below the frozen 78.1), i.e., plasticity has a
+\emph{budget} --- brief exposure adapts, prolonged exposure erodes. We
+therefore treat epochs-per-task as a first-class hyperparameter of encoder
+plasticity, and isolate its contribution with a frozen-encoder control at
+matched exposure. \todo{frozen-e10 control, aggressive-adaptation (q=0.2)
+and no-anchor ablations running; RanPAC-head combination queued; 5-seed
+promotion pending}
+
+\subsection{Task-agnostic (class-IL) evaluation}
+\label{sec:classil}
+All results above use task-aware evaluation. Merging all heads and taking a
+global argmax (no task identity at test) gives a first class-IL picture
+(seed 42, C100 10-task, layer3+4; 5-seed runs in progress): MAS-adapter
+62.9 with only 2.6 forgetting, naive 61.3 with 32.1 forgetting, NCM
+61.9--63.4, RanPAC 69.1 (layer4). Two observations survive the protocol
+change: protection still converts catastrophic forgetting into near-zero
+forgetting (the MAS--naive gap is now almost entirely \emph{cross-task
+confusion}, not forgetting), and RanPAC's classifier-capacity advantage grows
+in its native task-agnostic setting. On Split CIFAR-10 the multi-tap RanPAC
+reaches 92.4 class-IL. \todo{complete 5-seed class-IL cells + placement
+deltas under class-IL}
 
 \section{Discussion and Limitations}
 \label{sec:limits}
@@ -411,9 +432,10 @@ structure into the projected embedding, so early CLS tokens add mostly noise
 from a second late tap. This yields a testable rule of thumb: \emph{the wider
 the distribution shift, the deeper into the network the useful taps reach.}
 
-\paragraph{Limitations.} (i) Task-incremental protocol with known test-time
-task identity; class-incremental extension is the clear next step
-\todo{pending decision/experiments}. (ii) Two encoders; DINOv2-scale
+\paragraph{Limitations.} (i) Our primary protocol is task-incremental;
+\cref{sec:classil} adds merged-head class-IL results, but stronger class-IL
+machinery (task-id inference, calibrated heads) is future work. (ii) Two
+encoders; DINOv2-scale
 self-supervised models remain to be mapped. (iii) Classic small-image streams
 under large pre-trained backbones --- near-distribution CIFAR results sit at
 ceiling and we interpret them only through forgetting. (iv) Placement is
