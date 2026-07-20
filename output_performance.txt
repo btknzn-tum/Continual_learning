@@ -14,12 +14,18 @@
      C100t10 l3+4: MAS 37.1±1.8 (F6.5) | naive 29.6±2.2 (F63.5) | NCM 61.9 | RanPAC 76.7±0.1
      -> placement helps RanPAC MORE under class-IL: +7.7 (l4 69.1 -> l3+4 76.7)
      -> regularized adapters are TASK-IL tools; RanPAC wins class-IL (capacity)
-  SELECTIVE ENCODER PLASTICITY (our method, seed42):
-     5-Data e10: 81.23 (vs frozen MAS 78.09, +3.1) — gain = RETENTION
-                 (MNIST end 83.2->93.5, SVHN 50.2->56.3; enc moves 0.1-0.2%)
-     5-Data e20: 77.01 (OVER-drifts — plasticity has a budget)
-     C100t10: 89.09 (<90.17 frozen) | C100t20: 93.41 (<94.47) — no shift, no gain
-     RanPAC-head combination + aggressive q=0.2 ablation: RUNNING
+  SELECTIVE ENCODER PLASTICITY (our method, seed42) — HONEST NULL RESULT:
+     5-Data e10 plastic q=0.05: 81.23 F4.52  <- LOSES to matched frozen control
+     5-Data e10 FROZEN q=0 (matched pipeline): 82.02 F2.92  <- frozen WINS
+       (earlier "+3.1 vs cached 78.09" was a baseline-mismatch artifact)
+     ablations: e20 over-drifts 77.0 | q=0.2 aggressive 81.9 F11.7 |
+                sim=0 no-anchor 81.9 F7.3 (anchor = pure stability reg)
+     C100t10 89.09 (<90.17) | C100t20 93.41 (<94.47) — no gain on any stream
+  RanPAC-HEAD COMBINATION (adapted encoder + ridge head), 5-Data:
+     rp=86.88 til / 86.71 cil  <- also BELOW frozen RanPAC 87.28/87.12
+     but +4.5 over gradient MLP adapter (82.36) — capacity story holds again
+     => frozen-feature ceiling stands under BOTH classifier heads (honest bound)
+  PAPER: 10pp, TODO-free, 0 errors, TMLR template — paper/main.tex
   STATS: MAS vs naive p<1e-4 (+16, rock solid); MAS vs EWC p>0.4 (signal doesn't
      matter); multi-tap adapter margin on C100 p=0.10 (n.s. — reported honestly)
   CAPACITY (5-seed): h1024 MAS 97.94 < h256; LoRA+MAS C100 93.25±0.12 (surprise:
