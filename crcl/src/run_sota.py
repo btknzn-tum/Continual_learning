@@ -145,13 +145,17 @@ def main():
     p.add_argument("--seeds", nargs="*", type=int, default=SEEDS_FULL)
     p.add_argument("--eval-classil", action="store_true",
                    help="task-agnostic (global-argmax) evaluation, _cil tag")
+    p.add_argument("--val-frac", type=float, default=0.0,
+                   help=">0: evaluate on a train-carved validation holdout "
+                        "(for honest tap/config selection; NOT saved as a result)")
     a = p.parse_args()
     if a.eval_classil:
         global CLASSIL
         CLASSIL = True
     n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist", "fivedata") else 10)
     cfg = copy.deepcopy(DEFAULT_CONFIG)
-    cfg.update({"dataset": a.dataset, "backbone": a.backbone, "n_tasks": n_tasks})
+    cfg.update({"dataset": a.dataset, "backbone": a.backbone, "n_tasks": n_tasks,
+                "val_frac": a.val_frac})
 
     for method in a.methods:
         fn = {"ranpac": run_ranpac, "ncm": run_ncm}[method]
@@ -168,6 +172,10 @@ def main():
             tag = f"{a.dataset}_{a.backbone}_t{n_tasks}_{method}"
             if CLASSIL:
                 tag += "_cil"
+            # validation-selection runs are diagnostic only — never overwrite
+            # the real test-set result JSONs
+            if a.val_frac > 0:
+                tag += "_val"
             save_result(RESULTS_DIR, tag, seed, payload)
             rows.append(m)
             print(f"{method} seed{seed}: AvgAcc={m['avg_acc']*100:.2f} "
