@@ -528,9 +528,13 @@ that placement (i) changes outcomes by more than the choice of regularizer,
 (ii) transfers across method families, improving RanPAC by up to $+4.6$ points
 with no algorithmic change, (iii) depends qualitatively on the encoder, and
 (iv) interacts with distribution shift by a simple rule: the wider the shift,
-the deeper the useful taps. We release the full benchmark --- one trainer,
-seven methods, two encoders, five streams, five seeds --- so that future
-adapter-based CL methods can report \emph{where} they attach, not only
+the deeper the useful taps. Attempting to go further, we find the frozen-feature
+ceiling remarkably hard to cross: a forgetting-safe budget of encoder plasticity
+does not beat a matched frozen control under either a gradient or a
+random-projection classifier --- a boundary we report honestly to mark where
+future adaptation work must improve. We release the full benchmark --- one
+trainer, seven methods, two encoders, five streams, five seeds --- so that
+future adapter-based CL methods can report \emph{where} they attach, not only
 \emph{how} they protect.
 
 \bibliography{refs}
