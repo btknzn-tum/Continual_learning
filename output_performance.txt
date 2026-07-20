@@ -1,7 +1,32 @@
 ================================================================================
- OUTPUT PERFORMANCE — MAS-Protected Adapters CL Benchmark
- Updated: 2026-07-19 | commit 899e029 | server: RTX 5070 (vast.ai)
+ OUTPUT PERFORMANCE — Placement / Protected-Adapter CL Benchmark
+ Updated: 2026-07-20 09:xx | server: RTX 5070 (vast.ai) | paper: paper/main.tex
 ================================================================================
+
+**NEW (overnight) — headline additions**
+  PLACEMENT TRANSFERS TO RanPAC (5-seed, ResNet-50), multi-tap vs last tap:
+     C10      98.50±0.06 vs 98.20±0.06  (+0.30)
+     C100t10  93.12±0.13 vs 92.11±0.24  (+1.01, Welch p=2e-4)
+     C100t20  96.15±0.26 vs 95.88±0.10  (+0.27)
+     5-Data   87.28±0.10 vs 82.69±0.04  (+4.59)  <- gain scales with shift
+     CLIP 5-Data 89.63 vs 88.42 (+1.21)
+  CLASS-IL (task-agnostic, 5-seed where noted):
+     C100t10 l3+4: MAS 37.1±1.8 (F6.5) | naive 29.6±2.2 (F63.5) | NCM 61.9 | RanPAC 76.7±0.1
+     -> placement helps RanPAC MORE under class-IL: +7.7 (l4 69.1 -> l3+4 76.7)
+     -> regularized adapters are TASK-IL tools; RanPAC wins class-IL (capacity)
+  SELECTIVE ENCODER PLASTICITY (our method, seed42):
+     5-Data e10: 81.23 (vs frozen MAS 78.09, +3.1) — gain = RETENTION
+                 (MNIST end 83.2->93.5, SVHN 50.2->56.3; enc moves 0.1-0.2%)
+     5-Data e20: 77.01 (OVER-drifts — plasticity has a budget)
+     C100t10: 89.09 (<90.17 frozen) | C100t20: 93.41 (<94.47) — no shift, no gain
+     RanPAC-head combination + aggressive q=0.2 ablation: RUNNING
+  STATS: MAS vs naive p<1e-4 (+16, rock solid); MAS vs EWC p>0.4 (signal doesn't
+     matter); multi-tap adapter margin on C100 p=0.10 (n.s. — reported honestly)
+  CAPACITY (5-seed): h1024 MAS 97.94 < h256; LoRA+MAS C100 93.25±0.12 (surprise:
+     beats MLP multi-tap, ties RanPAC — flagged as adapter-design finding)
+
+--------------------------------------------------------------------------------
+
 
 SETUP
   Task-incremental CL (task id known at test). Frozen backbone (ResNet-50
