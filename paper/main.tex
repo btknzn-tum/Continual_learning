@@ -440,10 +440,18 @@ stability side) to pay off. A combination with a stronger classifier head is
 examined next.
 
 \paragraph{Combining with a RanPAC head.} Since the classifier-capacity gap
-(\cref{sec:honest}) rather than encoder features limits our adapter, we also
-fit a streaming RanPAC ridge head on the (lightly adapted) encoder's
-multi-tap features. \todo{fivedata combination result vs.\ frozen RanPAC 87.3
---- run in progress}
+(\cref{sec:honest}) rather than the encoder limits our adapter, we also fit a
+streaming RanPAC ridge head on the \emph{same} lightly adapted encoder's
+multi-tap features. On the adapted encoder the ridge head scores 86.9 (task-IL)
+/ 86.7 (class-IL) on the 5-dataset stream --- reproducing the $+4.5$
+classifier-capacity gap over the gradient MLP adapter (82.4) yet again, but
+still \emph{below} the same head on the \emph{frozen} encoder (87.3 / 87.1).
+The two independent classifiers thus agree: the small encoder adaptation we
+apply does not improve the features in a way either head can exploit; the
+frozen ceiling stands under both. We read this consistency as evidence that
+crossing it will require adaptation at a larger scale (more parameters or more
+exposure) than a forgetting-safe budget allows here --- an honest boundary for
+future work rather than a solved problem.
 
 \subsection{Task-agnostic (class-IL) evaluation}
 \label{sec:classil}
