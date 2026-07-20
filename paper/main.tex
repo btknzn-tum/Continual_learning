@@ -48,8 +48,8 @@ earliest taps of both encoders, while MAS restores near-upper-bound accuracy at
 every depth. Capacity-matched controls (wider MLP, LoRA) confirm the gains stem
 from placement and protection, not parameters. We conclude with an honest
 account of where protected adapters still trail random-projection classifiers
-and \todo{selective encoder plasticity results pending} how far frozen features
-can be pushed.
+--- a gap of classifier capacity, not forgetting --- and of how far frozen
+features can be pushed.
 \end{abstract}
 
 \section{Introduction}
@@ -238,7 +238,7 @@ hurts, the opposite of ResNet-50. $^*$single seed, 5-seed running.}
 Tap & Naive & MAS & EWC \\
 \midrule
 block3 & 42.0$\pm$1.2 (35.5) & 67.8$\pm$0.4 (1.9) & 58.3$\pm$2.3 (15.4) \\
-block9 & 74.4$\pm$2.1 (20.7) & 87.3$\pm$0.5 (1.0) & \todo{} \\
+block9 & 74.4$\pm$2.1 (20.7) & 87.3$\pm$0.5 (1.0) & 87.5$\pm$1.5 (4.1) \\
 final & 91.6$^*$ (5.8) & 94.1$^*$ (0.4) & \best{95.4$^*$} (1.0) \\
 block9+final & 87.5$^*$ (10.2) & 93.9$^*$ (1.0) & 94.8$^*$ (1.6) \\
 block3+final & --- & 93.3$\pm$0.3 (0.7) & --- \\
@@ -293,6 +293,7 @@ except $^*$.}
 Encoder & Stream & RanPAC (last tap) & RanPAC (multi-tap) & $\Delta$ \\
 \midrule
 ResNet-50 & Split CIFAR-10 & 98.30$^*$ & 98.42$^*$ & +0.12 \\
+ResNet-50 & C100 (10 t.) & 91.87$^*$ & \best{92.93$^*$} & +1.06 \\
 ResNet-50 & C100 (20 t.) & 95.88$\pm$0.10 & \best{96.15$\pm$0.26} & +0.27 \\
 ResNet-50 & 5-Datasets & 82.69$\pm$0.04 & \best{87.28$\pm$0.10} & \best{+4.59} \\
 \midrule
@@ -347,11 +348,15 @@ CLIP RanPAC (+our placement) & 96.6$\pm$0.1$^{t10}$ & \best{89.6$\pm$0.0} \\
 \label{sec:capacity}
 On Split CIFAR-10 (layer4), widening the adapter from $h{=}256$ (MAS
 98.06$\pm$0.11) to the multi-tap-input-matched $h{=}354$ (98.22$^*$) and
-further to $h{=}1024$ (97.87$^*$) does \emph{not} reproduce the multi-tap gain
---- the widest adapter is in fact \emph{worse} than the narrowest. Parameter
-count is not the active ingredient; placement is.
-\todo{EWC h1024, LoRA rows, C100 capacity from compare chain; 5-seed
-promotion via phase2}
+further to $h{=}1024$ (97.87$^*$; EWC 97.42$^*$) does \emph{not} reproduce the
+multi-tap gain --- the widest adapters are in fact \emph{worse} than the
+narrowest. On CIFAR-100 the single-seed $h{=}354$ control (90.59) sits within
+seed noise of multi-tap (90.17$\pm$0.51); we defer judgment on that cell to
+the running 5-seed promotion and do not claim it. The decisive
+capacity-independent evidence is \cref{tab:transfer}: RanPAC's projection
+dimension is fixed at $10^4$ regardless of input width, so its multi-tap gains
+($+1.1$ to $+4.6$) cannot be a parameter-count effect at all.
+\todo{LoRA rows; 5-seed capacity promotion via phase2}
 
 \subsection{Beyond frozen features (conditional)}
 \label{sec:beyond}
@@ -387,7 +392,17 @@ hyperparameter tuning on a validation split mirrors common practice but is an
 oracle relative to strictly-online CL.
 
 \section{Conclusion}
-\todo{write after results finalized}
+Importance-protected adapters are a strong, simple recipe for continual
+learning on frozen encoders --- but \emph{where} they read the encoder has
+been an unexamined default. Mapping insertion depth systematically, we find
+that placement (i) changes outcomes by more than the choice of regularizer,
+(ii) transfers across method families, improving RanPAC by up to $+4.6$ points
+with no algorithmic change, (iii) depends qualitatively on the encoder, and
+(iv) interacts with distribution shift by a simple rule: the wider the shift,
+the deeper the useful taps. We release the full benchmark --- one trainer,
+seven methods, two encoders, five streams, five seeds --- so that future
+adapter-based CL methods can report \emph{where} they attach, not only
+\emph{how} they protect.
 
 \bibliography{refs}
 \bibliographystyle{tmlr}
