@@ -146,6 +146,22 @@ def evaluate(model, x, y, task_id, batch_size: int = 2048, zero_h1=None, zero_h2
     return correct / len(x)
 
 
+@torch.no_grad()
+def evaluate_classil(model, x, y, task_true, n_seen, class_counts,
+                     batch_size: int = 2048):
+    """Task-agnostic (class-IL) evaluation: argmax over ALL seen heads
+    concatenated; correct iff the winning (task, local-class) slot matches.
+    Standard merged-head protocol for multi-head regularization methods."""
+    offsets = np.cumsum([0] + [class_counts[j] for j in range(n_seen)])
+    target = offsets[task_true] + y
+    correct = 0
+    for i in range(0, len(x), batch_size):
+        xb = x[i:i + batch_size]
+        logits = torch.cat([model(xb, j)[2] for j in range(n_seen)], dim=1)
+        correct += int((logits.argmax(1) == target[i:i + batch_size]).sum())
+    return correct / len(x)
+
+
 def _params(model):
     out = {}
     for n in PARAM_NAMES:
@@ -420,7 +436,11 @@ def run_sequence(cfg):
                               enabled=use_reserve and cfg["head_trim"])
 
         for k in range(t + 1):
-            A[t, k] = evaluate(model, *test_sets[k], k)
+            if cfg.get("eval_classil"):
+                A[t, k] = evaluate_classil(model, *test_sets[k], k, t + 1,
+                                           class_counts)
+            else:
+                A[t, k] = evaluate(model, *test_sets[k], k)
 
     return {"config": cfg, "acc_matrix": A.tolist(), "git": git_hash()}, A, stats
 

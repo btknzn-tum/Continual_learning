@@ -42,7 +42,12 @@ def task_offsets(counts):
     return out, off
 
 
+CLASSIL = False  # set by --eval-classil: global argmax instead of task block
+
+
 def eval_matrix_entry(logits_all, off, cnt, y_local):
+    if CLASSIL:
+        return float((logits_all.argmax(1).cpu() == off + y_local).float().mean())
     logits = logits_all[:, off:off + cnt]
     return float((logits.argmax(1).cpu() == y_local).float().mean())
 
@@ -138,7 +143,12 @@ def main():
     p.add_argument("--methods", nargs="*", default=["ranpac", "ncm"])
     p.add_argument("--n-tasks", type=int, default=None)
     p.add_argument("--seeds", nargs="*", type=int, default=SEEDS_FULL)
+    p.add_argument("--eval-classil", action="store_true",
+                   help="task-agnostic (global-argmax) evaluation, _cil tag")
     a = p.parse_args()
+    if a.eval_classil:
+        global CLASSIL
+        CLASSIL = True
     n_tasks = a.n_tasks or (5 if a.dataset in ("cifar10", "mnist", "fivedata") else 10)
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update({"dataset": a.dataset, "backbone": a.backbone, "n_tasks": n_tasks})
@@ -156,6 +166,8 @@ def main():
                        "git": git_hash(),
                        "runtime_sec": round(time.time() - t0, 1)}
             tag = f"{a.dataset}_{a.backbone}_t{n_tasks}_{method}"
+            if CLASSIL:
+                tag += "_cil"
             save_result(RESULTS_DIR, tag, seed, payload)
             rows.append(m)
             print(f"{method} seed{seed}: AvgAcc={m['avg_acc']*100:.2f} "
