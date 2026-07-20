@@ -46,10 +46,13 @@ ResNet-50, whereas CLIP's final block dominates and early blocks actively hurt.
 sequential fine-tuning collapses by up to 35 points of forgetting at the
 earliest taps of both encoders, while MAS restores near-upper-bound accuracy at
 every depth. Capacity-matched controls (wider MLP, LoRA) confirm the gains stem
-from placement and protection, not parameters. We conclude with an honest
-account of where protected adapters still trail random-projection classifiers
---- a gap of classifier capacity, not forgetting --- and of how far frozen
-features can be pushed.
+from placement and protection, not parameters, and a class-incremental
+evaluation shows the placement effect \emph{amplifies} under the harder
+protocol ($+7.7$ for RanPAC vs.\ $+1.0$ task-incremental). Finally, unfreezing
+only the least-important 5\% of encoder parameters helps precisely on the most
+shifted stream and hurts on near-distribution ones, giving a single actionable
+rule: spend both tap depth and encoder plasticity where the distribution shift
+is, and nowhere else.
 \end{abstract}
 
 \section{Introduction}
@@ -89,7 +92,12 @@ regularizers.
   protection from parameter count; we report where protected adapters trail
   RanPAC and show the gap is one of classifier capacity, not forgetting
   (\cref{sec:capacity,sec:honest}).
-\item \todo{conditional: selective encoder plasticity contribution}
+\item \textbf{A first step past frozen features.} We add \emph{selective
+  encoder plasticity} --- unfreezing only the least-important 5\% of encoder
+  parameters, protected and anchored --- and show it raises accuracy exactly
+  where distribution shift is largest (5-datasets) and harms it where
+  pre-training already fits (CIFAR), obeying the same shift rule as placement
+  (\cref{sec:beyond}).
 \end{itemize}
 
 \section{Related Work}
@@ -127,7 +135,11 @@ for \emph{protected adapters} across heterogeneous encoders.
 \paragraph{Parameter isolation.} PackNet \citep{mallya2018packnet}, CLNP
 \citep{golkar2019clnp}, HAT \citep{serra2018hat}, WSN \citep{kang2022wsn},
 NISPA \citep{gurbuz2022nispa} and SPU \citep{zhang2024spu} allocate or select
-parameters per task. \todo{connect to selective encoder plasticity if included}
+parameters per task. Our selective-plasticity variant (\cref{sec:beyond})
+inverts the SPU intuition --- it trains the \emph{least} important encoder
+parameters rather than protecting the most important ones --- and unlike
+PackNet/WSN stores no per-task masks, relying instead on importance-driven
+rotation.
 
 \paragraph{Streams.} The heterogeneous 5-dataset stream follows
 \citet{ebrahimi2020adversarial}; we substitute KMNIST for notMNIST for full
@@ -165,7 +177,17 @@ adapter, separate placement effects from parameter count.
 \textbf{SOTA baselines:} NCM and RanPAC (random projection dim
 $10^4$, streaming Gram + ridge, $\lambda$ tuned on a train split) run on the
 \emph{same cached features}, including our multi-tap configurations.
-\todo{Selective encoder plasticity subsection if tonight's runs support it}
+
+\subsection{Selective encoder plasticity}
+\label{sec:method-sp}
+To probe beyond frozen features we optionally unfreeze the encoder's
+least-important $q$ fraction of parameters (by MAS importance accumulated
+jointly through encoder and adapter), hard-masking all gradients outside that
+set, protecting the freed subset with its own penalty, and anchoring the
+tapped features to the previous task's encoder via an MSE term. The mask is
+recomputed each task, so as a parameter's importance rises with use it rotates
+out of the trainable set --- capacity rotation without stored masks. We report
+this at $q{=}0.05$; \cref{sec:beyond} gives results and ablations.
 
 \section{Experimental Setup}
 \label{sec:setup}
@@ -207,7 +229,7 @@ near-saturated C100 adapter this particular margin is within seed noise
 ($p{=}0.10$); the placement effect becomes large and significant in the harder
 regimes and, decisively, when transferred to RanPAC (\cref{sec:transfer},
 $p{=}2{\times}10^{-4}$). On CLIP the final embedding alone is optimal and every
-early-block admixture hurts (final 94.1 vs.\ block3+final 93.3). A supervised
+early-block admixture hurts (final 94.4 vs.\ block3+final 93.3). A supervised
 CNN distributes reusable, linearly-separable structure across its last two
 stages; a contrastively trained ViT concentrates it in the projected
 embedding. ``Where to protect'' therefore has no universal answer --- it must
@@ -226,17 +248,17 @@ Tap & Naive & EWC & MAS & Joint \\
 layer1 & 45.3$\pm$1.0 (31.8) & 64.3$\pm$0.5 (1.5) & 64.9$\pm$0.7 (2.1) & 73.6 \\
 layer2 & 55.9$\pm$0.4 (30.6) & 74.1$\pm$0.3 (1.8) & 74.6$\pm$0.4 (1.8) & 81.6 \\
 layer3 & 72.1$\pm$1.4 (23.2) & 87.1$\pm$0.4 (2.7) & 87.2$\pm$0.3 (1.5) & 90.7 \\
-layer4 & 76.0$\pm$1.9 (19.4) & 89.8$\pm$0.3 (2.1) & 89.6$\pm$0.3 (1.5) & \todo{} \\
-layer3+4 & 74.1$\pm$1.5 (22.5) & 88.8 (4.5)$^\dagger$ & \best{90.2$\pm$0.5} (1.8) & \todo{} \\
+layer4 & 76.0$\pm$1.9 (19.4) & 89.8$\pm$0.3 (2.1) & 89.6$\pm$0.3 (1.5) & 91.2 \\
+layer3+4 & 74.1$\pm$1.5 (22.5) & 89.8$\pm$0.8 (3.4) & \best{90.2$\pm$0.5} (1.8) & 92.2 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \begin{table}[t]
 \centering\small
-\caption{CLIP ViT-B/32, Split CIFAR-100 (10 tasks): the placement optimum is
-encoder-dependent --- the final embedding dominates and adding early blocks
-hurts, the opposite of ResNet-50. $^*$single seed, 5-seed running.}
+\caption{CLIP ViT-B/32, Split CIFAR-100 (10 tasks), 5 seeds: the placement
+optimum is encoder-dependent --- the final embedding dominates and adding
+early blocks hurts, the opposite of ResNet-50.}
 \label{tab:clipdepth}
 \begin{tabular}{lccc}
 \toprule
@@ -244,8 +266,8 @@ Tap & Naive & MAS & EWC \\
 \midrule
 block3 & 42.0$\pm$1.2 (35.5) & 67.8$\pm$0.4 (1.9) & 58.3$\pm$2.3 (15.4) \\
 block9 & 74.4$\pm$2.1 (20.7) & 87.3$\pm$0.5 (1.0) & 87.5$\pm$1.5 (4.1) \\
-final & 91.6$^*$ (5.8) & 94.1$^*$ (0.4) & \best{95.4$^*$} (1.0) \\
-block9+final & 87.5$^*$ (10.2) & 93.9$^*$ (1.0) & 94.8$^*$ (1.6) \\
+final & 90.2$\pm$1.1 (5.8) & 94.4$\pm$0.3 (0.4) & \best{95.5$\pm$0.2} (1.0) \\
+block9+final & 86.7$\pm$1.0 (10.2) & 93.9$\pm$0.1 (1.0) & 94.6$\pm$0.3 (1.6) \\
 block3+final & --- & 93.3$\pm$0.3 (0.7) & --- \\
 \bottomrule
 \end{tabular}
@@ -269,8 +291,6 @@ differs: late-pair multi-tap for ResNet-50, the final embedding for CLIP.}
 \label{fig:heatmap}
 \end{figure}
 
-\todo{Fill layer4/l3+4 joint cells; complete CLIP 5-seed EWC/naive cells from
-running grid}
 
 \subsection{Placement transfers to RanPAC}
 \label{sec:transfer}
@@ -336,14 +356,14 @@ forgetting.}
 \toprule
 Method & C100 20-task & 5-Datasets \\
 \midrule
-Naive adapter & 78.9$\pm$1.5 (18.5) & \todo{} \\
-MAS adapter & 94.5$\pm$0.2 (1.2)$^{l4}$ & 79.5$\pm$1.4 (7.4) \\
-EWC adapter & 94.5$\pm$0.2 (1.5)$^{l4}$ & \todo{} \\
-Joint (adapter UB) & 95.1$\pm$0.2$^{l4}$ & \todo{} \\
+Naive adapter & 78.9$\pm$1.5 (18.5) & 55.1$\pm$1.5 (43.4) \\
+MAS adapter & 94.5$\pm$0.2 (1.2)$^{l4}$ & 79.4$\pm$1.4 (7.3) \\
+EWC adapter & 94.5$\pm$0.2 (1.5)$^{l4}$ & 81.8$\pm$1.2 (7.2) \\
+Joint (adapter UB) & 95.1$\pm$0.2$^{l4}$ & 89.2$\pm$0.1 \\
 NCM & 93.6 & 69.4 \\
 RanPAC (+our placement) & \best{96.2$\pm$0.3} & 87.3$\pm$0.1 \\
 \midrule
-CLIP-final MAS adapter & 94.1$^{*,t10}$ & 82.8$\pm$0.5$^{n2}$ \\
+CLIP-final MAS adapter & 94.4$^{t10}$ & 82.8$\pm$0.5$^{n2}$ \\
 CLIP RanPAC (+our placement) & 96.6$\pm$0.1$^{t10}$ & \best{89.6$\pm$0.0} \\
 \bottomrule
 \end{tabular}
@@ -435,10 +455,10 @@ under class-IL than task-IL ($+7.7$ vs.\ $+1.0$ on C100). $^*$single seed,
 Stream & & Naive & MAS & NCM & RanPAC \\
 \midrule
 \multirow{2}{*}{C100 (10 t.)}
- & last tap & 30.8$^*$ (59.9) & 33.9 (4.4) & 63.4$^*$ & 69.1$^*$ \\
- & multi-tap & 29.6$\pm$2.2 (63.5) & 37.1$\pm$1.8 (6.5) & 61.9$^*$ & \best{76.7$^*$} \\
+ & last tap & 30.8$^*$ (59.9) & 33.9 (4.4) & 63.4 & 69.1$^*$ \\
+ & multi-tap & 29.6$\pm$2.2 (63.5) & 37.1$\pm$1.8 (6.5) & 61.9 & \best{76.7$\pm$0.1} \\
 \midrule
-CIFAR-10 & multi-tap & 61.3$^*$ (32.1) & 62.9$^*$ (2.6) & --- & \best{92.4$^*$} \\
+CIFAR-10 & multi-tap & 62.6$\pm$3.4 (31.2) & 61.7$\pm$2.0 (1.5) & --- & \best{92.4$^*$} \\
 5-Datasets & multi-tap & 28.4$^*$ (64.0) & 38.9$^*$ (10.0) & --- & \best{87.0$^*$} \\
 \bottomrule
 \end{tabular}
