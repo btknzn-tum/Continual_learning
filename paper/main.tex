@@ -292,8 +292,8 @@ except $^*$.}
 \toprule
 Encoder & Stream & RanPAC (last tap) & RanPAC (multi-tap) & $\Delta$ \\
 \midrule
-ResNet-50 & Split CIFAR-10 & 98.30$^*$ & 98.42$^*$ & +0.12 \\
-ResNet-50 & C100 (10 t.) & 91.87$^*$ & \best{92.93$^*$} & +1.06 \\
+ResNet-50 & Split CIFAR-10 & 98.20$\pm$0.06 & \best{98.50$\pm$0.06} & +0.30 \\
+ResNet-50 & C100 (10 t.) & 92.11$\pm$0.24 & \best{93.12$\pm$0.13} & +1.01 \\
 ResNet-50 & C100 (20 t.) & 95.88$\pm$0.10 & \best{96.15$\pm$0.26} & +0.27 \\
 ResNet-50 & 5-Datasets & 82.69$\pm$0.04 & \best{87.28$\pm$0.10} & \best{+4.59} \\
 \midrule
@@ -348,20 +348,50 @@ CLIP RanPAC (+our placement) & 96.6$\pm$0.1$^{t10}$ & \best{89.6$\pm$0.0} \\
 \label{sec:capacity}
 On Split CIFAR-10 (layer4), widening the adapter from $h{=}256$ (MAS
 98.06$\pm$0.11) to the multi-tap-input-matched $h{=}354$ (98.22$^*$) and
-further to $h{=}1024$ (97.87$^*$; EWC 97.42$^*$) does \emph{not} reproduce the
-multi-tap gain --- the widest adapters are in fact \emph{worse} than the
-narrowest. On CIFAR-100 the single-seed $h{=}354$ control (90.59) sits within
-seed noise of multi-tap (90.17$\pm$0.51); we defer judgment on that cell to
-the running 5-seed promotion and do not claim it. The decisive
-capacity-independent evidence is \cref{tab:transfer}: RanPAC's projection
-dimension is fixed at $10^4$ regardless of input width, so its multi-tap gains
-($+1.1$ to $+4.6$) cannot be a parameter-count effect at all.
-\todo{LoRA rows; 5-seed capacity promotion via phase2}
+further to $h{=}1024$ (97.94$\pm$0.11; EWC 97.42$^*$) does \emph{not}
+reproduce the multi-tap gain --- the widest adapters are in fact \emph{worse}
+than the narrowest. The same holds on CIFAR-100 at five seeds: $h{=}354$ at
+layer4 reaches 89.70$\pm$0.80, below multi-tap's 90.17$\pm$0.51 at matched
+parameters. The decisive capacity-independent evidence is \cref{tab:transfer}:
+RanPAC's projection dimension is fixed at $10^4$ regardless of input width, so
+its multi-tap gains ($+0.3$ to $+4.6$) cannot be a parameter-count effect at
+all.
 
-\subsection{Beyond frozen features (conditional)}
+\paragraph{An unexpected control result: identity-initialized residual
+adapters.} Our parameter-matched LoRA variant ($h = x + BAx$, $B$
+zero-initialized, MAS-protected, rank 144) behaves like the MLP on CIFAR-10
+(97.89$\pm$0.06) but \emph{outperforms every gradient-trained MLP
+configuration on CIFAR-100} (93.25$\pm$0.12, forgetting 0.10, vs.\ 90.17 for
+multi-tap MLP), approaching multi-tap RanPAC (93.12$\pm$0.13). Two caveats
+temper the comparison: the residual stream keeps the full 2048-d
+representation, so per-task heads are $8\times$ wider than the MLP's, and the
+identity initialization means each task starts from an unforgotten linear
+probe. We flag this as a finding for the adapter-design axis rather than the
+placement axis --- protection composes with \emph{any} of these architectures,
+and the placement map applies to all of them.
+
+\subsection{Beyond frozen features: selective encoder plasticity}
 \label{sec:beyond}
-\todo{Selective encoder plasticity: fivedata e10 running (task0 92.89 vs
-cached 92.02); c100 t10/t20 + fivedata e20 queued; ablations sim/alpha-enc/q}
+Frozen features cap every method above; can a \emph{minimally} plastic encoder
+raise the ceiling without reintroducing forgetting? We unfreeze only the
+bottom 5\% of encoder parameters by accumulated MAS importance (hard gradient
+mask, recomputed per task so claimed parameters rotate out), protect that
+subset with its own quadratic penalty, and anchor the tapped features to the
+previous task's encoder with an MSE term.
+
+The outcome is a clean confirmation of the shift rule from
+\cref{sec:transfer}. On the heterogeneous 5-dataset stream, selective
+plasticity lifts the MAS adapter from 78.1 to \textbf{81.2} (seed 42, 10
+epochs), with the gain coming from \emph{retention}: MNIST end-of-stream
+accuracy rises from 83.2 to 93.5 and SVHN from 50.2 to 56.3, while the encoder
+moves by only 0.1--0.2\% in relative parameter norm and consecutive trainable
+sets overlap 64--87\% (rotation is real but gradual). On near-distribution
+streams the same mechanism \emph{costs} accuracy (C100 10-task: 89.1 vs.\
+90.2 frozen; 20-task: 93.4 vs.\ 94.5): when pre-training already covers the
+stream, any encoder motion is pure risk. Encoder plasticity, like tap depth,
+should be spent \emph{where the shift is} --- and nowhere else.
+\todo{aggressive-adaptation ablation (q=0.2, weak anchor) + no-anchor /
+frozen-encoder ablations queued; 5-seed promotion pending}
 
 \section{Discussion and Limitations}
 \label{sec:limits}
