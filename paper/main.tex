@@ -195,18 +195,23 @@ block3). Early features are the most \emph{shared} across tasks --- exactly
 why overwriting them is catastrophic. Second, \textbf{importance protection
 converts every depth into a viable insertion point}, recovering 87--99\% of
 the depth-matched joint upper bound (e.g., layer3: 87.2 of 90.7; CLIP block3:
-$+25.8$ over naive). The choice of signal (MAS vs.\ EWC) matters far less than
-whether \emph{any} protection is present: across all 18 depth cells the two
-are statistically indistinguishable after Bonferroni correction in all but
-\todo{k} cases. Third, \textbf{the placement optimum is encoder-dependent}
-(\cref{fig:heatmap}): on ResNet-50 concatenating the late pair (layer3+4)
-beats the best single tap (90.2 vs.\ 89.6 on C100), while on CLIP the final
-embedding alone is optimal and every early-block admixture hurts (final 94.1
-vs.\ block3+final 93.3). A supervised CNN distributes reusable,
-linearly-separable structure across its last two stages; a contrastively
-trained ViT concentrates it in the projected embedding. ``Where to protect''
-therefore has no universal answer --- it must be searched, and our map is the
-first such search for protected adapters.
+$+25.8$ over naive). The gap between MAS and naive is enormous and
+unambiguous ($+16.1$ points on C100 layer3+4, Welch $p<10^{-4}$), whereas the
+choice of protection \emph{signal} barely registers: MAS vs.\ EWC is
+statistically indistinguishable at every core cell tested (C100 layer3+4
+$p{=}0.42$; layer4 $p{=}0.46$). What matters is that \emph{some} importance
+protection is present, not which one. Third, \textbf{the placement optimum is
+encoder-dependent} (\cref{fig:heatmap}): on ResNet-50 the late pair (layer3+4)
+gives the best adapter accuracy (90.2 vs.\ 89.6 at layer4), though on the
+near-saturated C100 adapter this particular margin is within seed noise
+($p{=}0.10$); the placement effect becomes large and significant in the harder
+regimes and, decisively, when transferred to RanPAC (\cref{sec:transfer},
+$p{=}2{\times}10^{-4}$). On CLIP the final embedding alone is optimal and every
+early-block admixture hurts (final 94.1 vs.\ block3+final 93.3). A supervised
+CNN distributes reusable, linearly-separable structure across its last two
+stages; a contrastively trained ViT concentrates it in the projected
+embedding. ``Where to protect'' therefore has no universal answer --- it must
+be searched, and our map is the first such search for protected adapters.
 \begin{table}[t]
 \centering\small
 \caption{Split CIFAR-100 (10 tasks, ResNet-50), AvgAcc\,\% $\pm$ std over 5
@@ -402,17 +407,42 @@ promotion pending}
 
 \subsection{Task-agnostic (class-IL) evaluation}
 \label{sec:classil}
-All results above use task-aware evaluation. Merging all heads and taking a
-global argmax (no task identity at test) gives a first class-IL picture
-(seed 42, C100 10-task, layer3+4; 5-seed runs in progress): MAS-adapter
-62.9 with only 2.6 forgetting, naive 61.3 with 32.1 forgetting, NCM
-61.9--63.4, RanPAC 69.1 (layer4). Two observations survive the protocol
-change: protection still converts catastrophic forgetting into near-zero
-forgetting (the MAS--naive gap is now almost entirely \emph{cross-task
-confusion}, not forgetting), and RanPAC's classifier-capacity advantage grows
-in its native task-agnostic setting. On Split CIFAR-10 the multi-tap RanPAC
-reaches 92.4 class-IL. \todo{complete 5-seed class-IL cells + placement
-deltas under class-IL}
+All results above use task-aware evaluation. Merging every head and taking a
+global argmax with no task identity at test (\cref{tab:classil}) sharpens two
+conclusions. First, \textbf{regularized adapters are task-IL instruments}: MAS
+still all but eliminates \emph{forgetting} (6.5\% vs.\ naive's 63.5\% on
+C100), but the merged head now suffers heavy cross-task confusion (37.1\%
+accuracy), the well-documented failure of regularization-based methods under
+class-IL \citep{vandeven2022three}. Second, and more important for this paper,
+\textbf{the placement finding not only survives the harder protocol but
+amplifies}: giving RanPAC our multi-tap features raises its class-IL accuracy
+by $+7.7$ points on C100 (69.1\,$\to$\,76.7), versus $+1.0$ under task-IL ---
+the wider the evaluation demands on the representation, the more where-you-tap
+matters. RanPAC dominates class-IL outright (76.7 vs.\ the adapter's 37.1),
+consistent with \cref{sec:honest}: its advantage is classifier capacity, and
+class-IL is where capacity is decisive.
+
+\begin{table}[t]
+\centering\small
+\caption{Class-incremental (task-agnostic, global-argmax) evaluation,
+ResNet-50 layer3+4. Regularized adapters suppress forgetting but not cross-task
+confusion; RanPAC dominates, and our multi-tap placement helps it \emph{more}
+under class-IL than task-IL ($+7.7$ vs.\ $+1.0$ on C100). $^*$single seed,
+5-seed running.}
+\label{tab:classil}
+\begin{tabular}{llcccc}
+\toprule
+Stream & & Naive & MAS & NCM & RanPAC \\
+\midrule
+\multirow{2}{*}{C100 (10 t.)}
+ & last tap & 30.8$^*$ (59.9) & 33.9 (4.4) & 63.4$^*$ & 69.1$^*$ \\
+ & multi-tap & 29.6$\pm$2.2 (63.5) & 37.1$\pm$1.8 (6.5) & 61.9$^*$ & \best{76.7$^*$} \\
+\midrule
+CIFAR-10 & multi-tap & 61.3$^*$ (32.1) & 62.9$^*$ (2.6) & --- & \best{92.4$^*$} \\
+5-Datasets & multi-tap & 28.4$^*$ (64.0) & 38.9$^*$ (10.0) & --- & \best{87.0$^*$} \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Discussion and Limitations}
 \label{sec:limits}
