@@ -391,7 +391,8 @@ def run_sequence(cfg):
         if use_er:
             buffer.add_task(t, x, y)
 
-        if method == "naive" and t == 0:
+        # diagnostic assumes the MLP adapter's hidden sizes — skip for LoRA
+        if method == "naive" and t == 0 and cfg.get("arch", "mlp") == "mlp":
             rand_masks = make_reserved_masks(cfg["d_hidden"], cfg["q"],
                                              seed=cfg["seed"] + 999)
             stats["accidental_dormancy"] = dormancy_fraction(
