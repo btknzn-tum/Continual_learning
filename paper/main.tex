@@ -394,7 +394,8 @@ adapters.} Our parameter-matched LoRA variant ($h = x + BAx$, $B$
 zero-initialized, MAS-protected, rank 144) behaves like the MLP on CIFAR-10
 (97.89$\pm$0.06) but \emph{outperforms every gradient-trained MLP
 configuration on CIFAR-100} (93.25$\pm$0.12, forgetting 0.10, vs.\ 90.17 for
-multi-tap MLP), approaching multi-tap RanPAC (93.12$\pm$0.13). Two caveats
+multi-tap MLP), matching multi-tap RanPAC (93.12$\pm$0.13, a statistical tie).
+Two caveats
 temper the comparison: the residual stream keeps the full 2048-d
 representation, so per-task heads are $8\times$ wider than the MLP's, and the
 identity initialization means each task starts from an unforgotten linear
