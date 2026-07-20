@@ -285,6 +285,72 @@ def bottom_q_masks(imp_e, q):
     return masks, frac
 
 
+class RPHead:
+    """Streaming RanPAC-style ridge head over the (evolving) encoder's tapped
+    features: per task, project current-encoder train features through a FIXED
+    random expansion, accumulate Gram/class statistics, and solve a ridge
+    classifier with lambda picked on an accumulated 5% train holdout. Combines
+    our selective-plasticity encoder with RanPAC's classifier capacity."""
+
+    def __init__(self, d_in, counts, device, seed, rp_dim=10000,
+                 lam_grid=(1e-3, 1e-1, 1e1, 1e3, 1e5)):
+        g = torch.Generator().manual_seed(seed)
+        self.W = (torch.randn(d_in, rp_dim, generator=g) / d_in ** 0.5).to(device)
+        self.G = torch.zeros(rp_dim, rp_dim, device=device)
+        self.offs = np.cumsum([0] + list(counts)).tolist()
+        self.n_cls = int(sum(counts))
+        self.C = torch.zeros(rp_dim, self.n_cls, device=device)
+        self.counts = counts
+        self.lam_grid = lam_grid
+        self.rp = rp_dim
+        self.device = device
+        self.ho = []
+
+    def project(self, x):
+        return F.relu(x @ self.W)
+
+    @torch.no_grad()
+    def add_task(self, feats, y, t, seed):
+        g = torch.Generator().manual_seed(seed * 1000 + t)
+        perm = torch.randperm(len(feats), generator=g)
+        nho = max(1, int(0.05 * len(feats)))
+        ho, tr = perm[:nho], perm[nho:]
+        for i in range(0, len(tr), 2048):
+            h = self.project(feats[tr[i:i + 2048]])
+            self.G += h.T @ h
+            Y = F.one_hot(y[tr[i:i + 2048]] + self.offs[t],
+                          self.n_cls).float().to(self.device)
+            self.C += h.T @ Y
+        self.ho.append((self.project(feats[ho]), y[ho], t))
+
+    @torch.no_grad()
+    def solve(self):
+        I = torch.eye(self.rp, device=self.device)
+        best_beta, best_acc = None, -1.0
+        for lam in self.lam_grid:
+            try:
+                beta = torch.linalg.solve(self.G + lam * I, self.C)
+            except RuntimeError:
+                continue
+            cor = tot = 0
+            for h, y, t in self.ho:
+                lo = (h @ beta)[:, self.offs[t]:self.offs[t] + self.counts[t]]
+                cor += int((lo.argmax(1) == y).sum())
+                tot += len(y)
+            if cor / max(tot, 1) > best_acc:
+                best_beta, best_acc = beta, cor / max(tot, 1)
+        return best_beta
+
+    @torch.no_grad()
+    def eval(self, beta, feats, y, k):
+        lo = torch.cat([self.project(feats[i:i + 4096])
+                        for i in range(0, len(feats), 4096)]) @ beta
+        til = float((lo[:, self.offs[k]:self.offs[k] + self.counts[k]]
+                     .argmax(1) == y).float().mean())
+        cil = float((lo.argmax(1) == self.offs[k] + y).float().mean())
+        return til, cil
+
+
 @torch.no_grad()
 def eval_head(adapter, feats, ys, task_id, batch=2048):
     correct = 0
@@ -319,6 +385,11 @@ def run_stream(cfg, device):
     stats_per_task = {}
     prev_mask_flat = None
     gen = torch.Generator().manual_seed(cfg["seed"])
+    rp = None
+    A_rp = A_rpc = None
+    if cfg.get("ranpac_head"):
+        rp = RPHead(d_in, counts, device, cfg["seed"])
+        A_rp, A_rpc = np.zeros((T, T)), np.zeros((T, T))
 
     for t in range(T):
         t0 = time.time()
@@ -425,16 +496,31 @@ def run_stream(cfg, device):
             del teacher
 
         adapter.freeze_head(t)
+        beta = None
+        if rp is not None:
+            ftr, ytr = extract_feats(encoder, x_t, y_t, taps,
+                                     stats_per_task[t], device, B, tf)
+            rp.add_task(ftr, ytr, t, cfg["seed"])
+            del ftr
+            beta = rp.solve()
         # encoder changed -> re-extract ALL seen eval sets under current
         # encoder, each with ITS OWN task's frozen z-stats
         for k in range(t + 1):
             fk, yk = extract_feats(encoder, *eval_sets[k], taps,
                                    stats_per_task[k], device, B, tf)
             A[t, k] = eval_head(adapter, fk, yk, k)
+            if beta is not None:
+                A_rp[t, k], A_rpc[t, k] = rp.eval(beta, fk, yk, k)
         run_stats["task_sec"].append(round(time.time() - t0, 1))
-        print(f"  task {t}: acc_so_far={A[t, :t + 1].mean() * 100:.2f} "
-              f"({run_stats['task_sec'][-1]}s)", flush=True)
+        msg = f"  task {t}: acc_so_far={A[t, :t + 1].mean() * 100:.2f}"
+        if beta is not None:
+            msg += (f" rp={A_rp[t, :t + 1].mean() * 100:.2f}"
+                    f" rp_cil={A_rpc[t, :t + 1].mean() * 100:.2f}")
+        print(msg + f" ({run_stats['task_sec'][-1]}s)", flush=True)
 
+    if rp is not None:
+        run_stats["rp_acc_matrix"] = A_rp.tolist()
+        run_stats["rp_cil_acc_matrix"] = A_rpc.tolist()
     return A, run_stats
 
 
@@ -459,6 +545,9 @@ def main():
     p.add_argument("--val-frac", type=float, default=0.0,
                    help=">0: tune on a train holdout (sweeps only)")
     p.add_argument("--workers", type=int, default=0, help="unused (GPU pipeline)")
+    p.add_argument("--ranpac-head", action="store_true",
+                   help="also maintain a streaming RanPAC ridge head on the "
+                        "adapted encoder's features (_rph tag)")
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--tag-suffix", default="")
     a = p.parse_args()
@@ -481,6 +570,7 @@ def main():
                 "sim_lambda": a.sim_lambda, "enc_lr": a.enc_lr, "lr": a.lr,
                 "epochs": a.epochs, "batch_size": a.batch_size,
                 "phi_samples": a.phi_samples, "val_frac": a.val_frac,
+                "ranpac_head": a.ranpac_head,
                 "backbone": f"r50enc_{depth}",
             })
             # ablations and HP variants get distinct tags automatically
@@ -490,6 +580,8 @@ def main():
                 tag += f"_sl{_qstr(a.sim_lambda)}"
             if alpha_enc != a.alpha:
                 tag += f"_ae{_qstr(alpha_enc)}"
+            if a.ranpac_head:
+                tag += "_rph"
             tag += a.tag_suffix
             out = os.path.join(RESULTS_DIR, tag, f"seed{seed}.json")
             if os.path.exists(out) and not a.overwrite:
